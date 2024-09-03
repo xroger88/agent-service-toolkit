@@ -7,6 +7,9 @@ services:
       - "80:80"
     env_file:
       - .env
+    environment:
+      - MONGO_HOST=host.docker.internal
+      - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
     develop:
       watch:
         - path: agent/
@@ -25,6 +28,8 @@ services:
       dockerfile: docker/Dockerfile.app
     ports:
       - "8501:8501"
+    env_file:
+      - .env
     depends_on:
       - agent_service
     environment:

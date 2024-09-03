@@ -1,8 +1,15 @@
 {
-    "python_version": "3.12",
-    "dependencies": ["."],
-    "graphs": {
-        "research_assistant": "./research_assistant.py:research_assistant"
-    },
-    "env": "../.env"
+  "python_version": "3.12",
+  "dockerfile_lines": [
+    "# need C++ compiler for pip install langchain-chroma",
+    "RUN apt-get update -y",
+    "RUN apt install build-essential manpages-dev -y"
+  ],
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "research_assistant": "./research_assistant.py:research_assistant"
+  },
+  "env": "../.env"
 }

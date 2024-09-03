@@ -19,8 +19,9 @@ from schema import ChatMessage
 # The app heavily uses AgentClient to interact with the agent's FastAPI endpoints.
 
 
-APP_TITLE = "Agent Service Toolkit"
+APP_TITLE = "Heka AI Agent"
 APP_ICON = "🧰"
+
 
 @st.cache_resource
 def get_agent_client():
@@ -54,32 +55,59 @@ async def main():
 
     models = {
         "OpenAI GPT-4o-mini (streaming)": "gpt-4o-mini",
+        "OpenAI GPT-4o (streaming)": "gpt-4o",
         "llama-3.1-70b on Groq": "llama-3.1-70b",
     }
     # Config options
     with st.sidebar:
         st.header(f"{APP_ICON} {APP_TITLE}")
         ""
-        "Full toolkit for running an AI agent service built with LangGraph, FastAPI and Streamlit"
+        "Welcome to Heka Service"
         with st.popover(":material/settings: Settings", use_container_width=True):
             m = st.radio("LLM to use", options=models.keys())
             model = models[m]
             use_streaming = st.toggle("Stream results", value=True)
-        
-        @st.dialog("Architecture")
-        def architecture_dialog():
-            st.image("https://github.com/JoshuaC215/agent-service-toolkit/blob/main/media/agent_architecture.png?raw=true")
-            "[View full size on Github](https://github.com/JoshuaC215/agent-service-toolkit/blob/main/media/agent_architecture.png)"
-            st.caption("App hosted on [Streamlit Cloud](https://share.streamlit.io/) with FastAPI service running in [Azure](https://learn.microsoft.com/en-us/azure/app-service/)")
 
-        if st.button(":material/schema: Architecture", use_container_width=True):
-            architecture_dialog()
+        # @st.dialog("Architecture")
+        # def architecture_dialog():
+        #     st.image(
+        #         "https://github.com/JoshuaC215/agent-service-toolkit/blob/main/media/agent_architecture.png?raw=true"
+        #     )
+        #     "[View full size on Github](https://github.com/JoshuaC215/agent-service-toolkit/blob/main/media/agent_architecture.png)"
+        #     st.caption(
+        #         "App hosted on [Streamlit Cloud](https://share.streamlit.io/) with FastAPI service running in [Azure](https://learn.microsoft.com/en-us/azure/app-service/)"
+        #     )
+
+        # if st.button(":material/schema: Architecture", use_container_width=True):
+        #     architecture_dialog()
+
+        @st.dialog("Example Questions")
+        def example_questions_dialog():
+            st.caption(
+                """
+- 헤카란 무엇인가? or what is heka?
+- 그루매틱 회사의 비전은 무엇인가? or what is the vision of Grumatic?
+- 그루매틱의 성장 전력은 무엇인가? or what is the growth strategy of Grumatic company?
+- 헤카 서비스를 사용하는 회사 목록을 알려줘 or what companies are using heka?
+- what organizations are there for company id f3b74b5cc9614419922dd6e0ad074f28
+- can you make a report for the invoice id 20240716009 in terms of cloud cost usage?
+- can you compare details for invoice id 202406623666 and 202407623666 in terms of cost usage?
+"""
+            )
+
+        if st.button("Example Questions", use_container_width=True):
+            example_questions_dialog()
 
         with st.popover(":material/policy: Privacy", use_container_width=True):
-            st.write("Prompts, responses and feedback in this app are anonymously recorded and saved to LangSmith for product evaluation and improvement purposes only.")
-
-        "[View the source code](https://github.com/JoshuaC215/agent-service-toolkit)"
-        st.caption("Made with :material/favorite: by [Joshua](https://www.linkedin.com/in/joshua-k-carroll/) in Oakland")
+            st.write(
+                "Prompts, responses and feedback in this app are anonymously recorded and saved to LangSmith for product evaluation and improvement purposes only."
+            )
+        "[Heka Home](https://www.heka.so)"
+        # "[View the source code](https://github.com/JoshuaC215/agent-service-toolkit)"
+        st.caption(
+            "Powered by Grumatic"
+            # "Made with :material/favorite: by [Joshua](https://www.linkedin.com/in/joshua-k-carroll/) in Oakland"
+        )
 
     # Draw existing messages
     if "messages" not in st.session_state:
@@ -87,13 +115,15 @@ async def main():
     messages: List[ChatMessage] = st.session_state.messages
 
     if len(messages) == 0:
-        WELCOME = "Hello! I'm an AI-powered research assistant with web search and a calculator. I may take a few seconds to boot up when you send your first message. Ask me anything!"
+        WELCOME = "Hello! I'm an AI-powered assistant providing the information about Grumatic company and their Heka solution for cloud cost billing automation and optimization. I may take a few seconds to boot up when you send your first message. Ask me anything!"
         with st.chat_message("ai"):
             st.write(WELCOME)
 
     # draw_messages() expects an async iterator over messages
     async def amessage_iter():
-        for m in messages: yield m
+        for m in messages:
+            yield m
+
     await draw_messages(amessage_iter())
 
     # Generate new message if the user provided new input
@@ -116,7 +146,7 @@ async def main():
             )
             messages.append(response)
             st.chat_message("ai").write(response.content)
-        st.rerun() # Clear stale containers
+        st.rerun()  # Clear stale containers
 
     # If messages have been generated, show feedback widget
     if len(messages) > 0:
@@ -125,9 +155,9 @@ async def main():
 
 
 async def draw_messages(
-        messages_agen: AsyncGenerator[ChatMessage | str, None],
-        is_new=False,
-    ):
+    messages_agen: AsyncGenerator[ChatMessage | str, None],
+    is_new=False,
+):
     """
     Draws a set of chat messages - either replaying existing messages
     or streaming new ones.
@@ -136,7 +166,7 @@ async def draw_messages(
     - Use a placeholder container to render streaming tokens as they arrive.
     - Use a status container to render tool calls. Track the tool inputs and outputs
       and update the status container accordingly.
-    
+
     The function also needs to track the last message container in session state
     since later messages can draw to the same container. This is also used for
     drawing the feedback widget in the latest chat message.
@@ -166,7 +196,7 @@ async def draw_messages(
                     st.session_state.last_message = st.chat_message("ai")
                 with st.session_state.last_message:
                     streaming_placeholder = st.empty()
-            
+
             streaming_content += msg
             streaming_placeholder.write(streaming_content)
             continue
@@ -186,12 +216,12 @@ async def draw_messages(
                 # If we're rendering new messages, store the message in session state
                 if is_new:
                     st.session_state.messages.append(msg)
-                
+
                 # If the last message type was not AI, create a new chat message
                 if last_message_type != "ai":
                     last_message_type = "ai"
                     st.session_state.last_message = st.chat_message("ai")
-                
+
                 with st.session_state.last_message:
                     # If the message has content, write it out.
                     # Reset the streaming variables to prepare for the next message.
@@ -210,32 +240,34 @@ async def draw_messages(
                         call_results = {}
                         for tool_call in msg.tool_calls:
                             status = st.status(
-                                    f"""Tool Call: {tool_call["name"]}""",
-                                    state="running" if is_new else "complete",
-                                )
+                                f"""Tool Call: {tool_call["name"]}""",
+                                state="running" if is_new else "complete",
+                            )
                             call_results[tool_call["id"]] = status
                             status.write("Input:")
-                            status.write(tool_call["args"])
+                            status.json(tool_call["args"], expanded=1)
 
                         # Expect one ToolMessage for each tool call.
                         for _ in range(len(call_results)):
                             tool_result: ChatMessage = await anext(messages_agen)
                             if not tool_result.type == "tool":
-                                st.error(f"Unexpected ChatMessage type: {tool_result.type}")
+                                st.error(
+                                    f"Unexpected ChatMessage type: {tool_result.type}"
+                                )
                                 st.write(tool_result)
                                 st.stop()
-                            
+
                             # Record the message if it's new, and update the correct
                             # status container with the result
                             if is_new:
                                 st.session_state.messages.append(tool_result)
                             status = call_results[tool_result.tool_call_id]
                             status.write("Output:")
-                            status.write(tool_result.content)
+                            status.json(tool_result.content, expanded=1)
                             status.update(state="complete")
 
             # In case of an unexpected message type, log an error and stop
-            case _: 
+            case _:
                 st.error(f"Unexpected ChatMessage type: {msg.type}")
                 st.write(msg)
                 st.stop()
@@ -247,13 +279,13 @@ async def handle_feedback():
     # Keep track of last feedback sent to avoid sending duplicates
     if "last_feedback" not in st.session_state:
         st.session_state.last_feedback = (None, None)
-    
+
     latest_run_id = st.session_state.messages[-1].run_id
     feedback = st.feedback("stars", key=latest_run_id)
 
     # If the feedback value or run ID has changed, send a new feedback record
     if feedback and (latest_run_id, feedback) != st.session_state.last_feedback:
-        
+
         # Normalize the feedback value (an index) to a score between 0 and 1
         normalized_score = (feedback + 1) / 5.0
 
