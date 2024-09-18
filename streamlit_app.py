@@ -1,6 +1,8 @@
 import asyncio
 import os
+import json
 from typing import AsyncGenerator, List
+import pprint
 
 import streamlit as st
 from streamlit.runtime.scriptrunner import get_script_run_ctx
@@ -184,6 +186,8 @@ async def draw_messages(
     streaming_content = ""
     streaming_placeholder = None
 
+    # matching tool calls to their results
+    call_results = {}
     # Iterate over the messages and draw them
     while msg := await anext(messages_agen, None):
         # str message represents an intermediate token being streamed
@@ -237,7 +241,6 @@ async def draw_messages(
                         # Create a status container for each tool call and store the
                         # status container by ID to ensure results are mapped to the
                         # correct status container.
-                        call_results = {}
                         for tool_call in msg.tool_calls:
                             status = st.status(
                                 f"""Tool Call: {tool_call["name"]}""",
@@ -248,23 +251,49 @@ async def draw_messages(
                             status.json(tool_call["args"], expanded=1)
 
                         # Expect one ToolMessage for each tool call.
-                        for _ in range(len(call_results)):
-                            tool_result: ChatMessage = await anext(messages_agen)
-                            if not tool_result.type == "tool":
-                                st.error(
-                                    f"Unexpected ChatMessage type: {tool_result.type}"
-                                )
-                                st.write(tool_result)
-                                st.stop()
+                        # for _ in range(len(call_results)):
+                        #     tool_result: ChatMessage = await anext(messages_agen)
+                        #     pprint.pp(f"*** {tool_result}\n")
+                        #     if not isinstance(tool_result, ChatMessage):
+                        #         print("*** tool_result is not ChatMessage type ??? so skip it.")
+                        #         continue
 
-                            # Record the message if it's new, and update the correct
-                            # status container with the result
-                            if is_new:
-                                st.session_state.messages.append(tool_result)
-                            status = call_results[tool_result.tool_call_id]
-                            status.write("Output:")
-                            status.json(tool_result.content, expanded=1)
-                            status.update(state="complete")
+                        #     if not tool_result.type == "tool":
+                        #         st.error(
+                        #             f"Unexpected ChatMessage type: {tool_result.type}"
+                        #         )
+                        #         st.write(tool_result)
+                        #         st.stop()
+
+                        #     # Record the message if it's new, and update the correct
+                        #     # status container with the result
+                        #     if is_new:
+                        #         st.session_state.messages.append(tool_result)
+                        #     status = call_results[tool_result.tool_call_id]
+                        #     status.write("Output:")
+                        #     status.json(tool_result.content, expanded=1)
+                        #     status.update(state="complete")
+
+            case "tool":
+                # tool message, the result of tool call
+                # Record the message if it's new, and update the correct
+                # status container with the result
+                if is_new:
+                    st.session_state.messages.append(msg)
+
+                if not msg.tool_call_id:
+                    st.error("Unexpected tool_call_id!")
+                    st.write(msg)
+                    st.stop()
+
+                status = call_results[msg.tool_call_id]
+                status.write("Output:")
+                try:
+                    json_content = json.loads(msg.content)
+                    status.write(msg.content, expanded=1)
+                except ValueError:
+                    status.write(msg.content)
+                status.update(state="complete")
 
             # In case of an unexpected message type, log an error and stop
             case _:

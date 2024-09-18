@@ -173,7 +173,7 @@ Currently the tests need to be run using the local development without Docker se
 
 To customize the agent for your own use case:
 
-1. Modify the `agent/research_assistant.py` file to change the agent's behavior and tools. Or, build a new agent from scratch.
+1. Modify the `agent/heka_agent.py` file to change the agent's behavior and tools. Or, build a new agent from scratch.
 2. Adjust the Streamlit interface in `streamlit_app.py` to match your agent's capabilities.
 
 ## Building other apps on the AgentClient

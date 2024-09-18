@@ -8,11 +8,12 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import RemoveMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.graph import CompiledGraph
 from langsmith import Client as LangsmithClient
 
-from agent import research_assistant
+from agent import heka_agent
 from schema import ChatMessage, Feedback, UserInput, StreamInput
 
 
@@ -31,8 +32,8 @@ class TokenQueueStreamingHandler(AsyncCallbackHandler):
 async def lifespan(app: FastAPI):
     # Construct agent with Sqlite checkpointer
     async with AsyncSqliteSaver.from_conn_string("checkpoints.db") as saver:
-        research_assistant.checkpointer = saver
-        app.state.agent = research_assistant
+        heka_agent.checkpointer = saver
+        app.state.agent = heka_agent
         yield
     # context manager will clean up the AsyncSqliteSaver on exit
 
@@ -120,14 +121,23 @@ async def message_generator(user_input: StreamInput) -> AsyncGenerator[str, None
         # s could have updates for multiple nodes, so check each for messages.
         new_messages = []
         for _, state in s.items():
-            new_messages.extend(state["messages"])
+            if state.get("messages", None):
+                new_messages.extend(state["messages"])
+            else:
+                print(f"no messages in state: {state}")
+
         for message in new_messages:
+            # ignore RemoveMessage
+            if isinstance(message, RemoveMessage):
+                continue
+
             try:
                 chat_message = ChatMessage.from_langchain(message)
                 chat_message.run_id = str(run_id)
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'content': f'Error parsing message: {e}'})}\n\n"
                 continue
+
             # LangGraph re-sends the input message, which feels weird, so drop it
             if (
                 chat_message.type == "human"

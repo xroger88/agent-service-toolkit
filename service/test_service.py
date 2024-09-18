@@ -7,7 +7,7 @@ from schema import ChatMessage
 
 client = TestClient(app)
 
-@patch("service.service.research_assistant")
+@patch("service.service.heka_agent")
 def test_invoke(mock_agent):
     QUESTION = "What is the weather in Tokyo?"
     ANSWER = "The weather in Tokyo is 70 degrees."

@@ -2,24 +2,68 @@ import os
 import math
 import numexpr
 import re
-from langchain_core.tools import tool, BaseTool
+import json
+from langchain_core.tools import tool, BaseTool, create_retriever_tool
+from langchain_core.runnables.config import RunnableConfig
+from langchain.tools import StructuredTool
 from langchain_community.tools import DuckDuckGoSearchResults, ArxivQueryRun
 from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain_core.tools import tool
-from agent import heka_database
-from typing import List
-
+from typing import List, Annotated, Union, Literal
 from langchain_chroma import Chroma
-
 # from langchain_community.vectorstores import Chroma
 from langchain_openai import OpenAIEmbeddings
+from langgraph.prebuilt import InjectedState
+from agent import heka_database
+from agent.util import to_json_serializable_doc
 
-web_search = DuckDuckGoSearchResults(name="WebSearch")
+#web_search = DuckDuckGoSearchResults(name="WebSearch")
 
 # Kinda busted since it doesn't return links
 arxiv_search = ArxivQueryRun(name="ArxivSearch")
 
+# for chroma vectorstore retriever
+if os.getenv("LANGSMITH_LANGGRAPH_DESKTOP"):
+    # LangGraph Studio Docker Container
+    CHROMA_DB_DIR = "/deps/__outer_agent/agent/chroma-db"
+else:
+    # Agent-Service-Tool Docker Container
+    CHROMA_DB_DIR = "/app/agent/chroma-db"
 
+# For local development, TODO: delete this
+if os.getenv("HOME") == "/Users/xroger88":
+    CHROMA_DB_DIR = "/Users/xroger88/Projects/Grumatic/llm/agent-service-toolkit/agent/chroma-db"
+
+CHROMA_COLLECTION_NAME = "rag-chroma"
+
+# from langchain_nomic.embeddings import NomicEmbeddings
+# CHROMA_EMBEDDING = NomicEmbeddings(
+#     model="nomic-embed-text-v1.5", inference_mode="local"
+# )
+
+CHROMA_EMBEDDING = OpenAIEmbeddings(model="text-embedding-3-large")
+
+vectorstore = Chroma(
+    collection_name=CHROMA_COLLECTION_NAME,
+    persist_directory=CHROMA_DB_DIR,
+    embedding_function=CHROMA_EMBEDDING,
+)
+
+retriever = vectorstore.as_retriever()
+retriever_tool = create_retriever_tool(
+    retriever,
+    "grumatic_heka_retriever",
+    "Searches and returns excerpts from heka solutions by Grumatic (그루매틱 헤카 솔루션)",
+)
+
+search_tools = [
+    retriever_tool,
+    arxiv_search,
+    # web_search,
+    TavilySearchResults(max_results=1),
+]
+
+
+# math tools
 def calculator_func(expression: str) -> str:
     """Calculates a math expression using numexpr.
 
@@ -54,157 +98,187 @@ def calculator_func(expression: str) -> str:
 calculator: BaseTool = tool(calculator_func)
 calculator.name = "Calculator"
 
-# for heka
-heka_user_db = heka_database.get_database_collection(heka_database.collections["user"])
-heka_company_db = heka_database.get_database_collection(
-    heka_database.collections["company"]
-)
-heka_organization_db = heka_database.get_database_collection(
-    heka_database.collections["organization"]
-)
-heka_aws_invoice_db = heka_database.get_database_collection(
-    heka_database.collections["aws_invoice"]
-)
+math_tools = [calculator]
 
+# for heka database tools
 
 @tool
-def get_all_companies(domain: str = "heka") -> List[dict]:
-    """Get all companies in heka"""
+def get_schema_info() -> dict:
+    "Get schema information for heka NOSQL mongo database"
+    schema = heka_database.get_schema()
+    keys_to_extract = ["user", "company", "organization", "aws_invoice", "nhn_invoice"]
+    # extracting keys using a for loop and conditional statement
+    extracted_dict = {}
+    for key, value in schema.items():
+        if key in keys_to_extract:
+            extracted_dict[key] = value
+
+    return extracted_dict
+
+@tool
+def get_user_info(id: str = None, limit: int = 1) -> List[dict]:
+    "Get user information in heka database"
     try:
-        cursor = heka_company_db.find({"delete_at": None})
+        db = heka_database.get_database_collection("user")
+        cursor = db.find({"deactivate": False,
+                          "$or": [{"uid": id}, {"email": id}, {"first_name": id}, {"last_name": id},
+                                  {"uid": {"$regex": id, "$options": "i"}},
+                                  {"email":{"$regex": id, "$options": "i"}},
+                                  {"first_name": {"$regex": id, "$options": "i"}},
+                                  {"last_name": {"$regex": id, "$options": "i"}},
+                                  ],
+                          } if id else {},
+                         {"_id": 0, "refresh_tokens": 0, "password": 0},
+                         limit=limit).sort({"email": 1})
+        result = []
+        for user in cursor:
+            db = heka_database.get_database_collection("company")
+            company_id = user["company_id"]
+            company_info = db.find_one({"uid": company_id}, {"name": 1})
+            company = f'{company_info["name"]}(id:{company_id})'
+            org_list = []
+            db = heka_database.get_database_collection("organization")
+            for org_id in user["organizations"]:
+                org_info = db.find_one({"uid": org_id},
+                                       {"name": 1})
+                org_list.append(f'{org_info["name"]}(id:{org_id})')
+            additionals = {"full_name": f'{user["first_name"]} {user["last_name"]}',
+                           "company": company,
+                           "organizations": ",".join(org_list),
+                           }
+            result.append(user | additionals)
+        return to_json_serializable_doc(result)
+    except Exception as e:
+        return {"error": f"Invalid query: {e}"}
+
+@tool
+def get_msp_info(id: str = None, limit: int = 1) -> List[dict]:
+    "Get MSP(Managed Service Provider) information in heka database"
+    try:
+        db = heka_database.get_database_collection("company")
+        cursor = db.find({"$or": [{"uid": id}, {"name": id},
+                                  {"uid": {"$regex": id, "$options": "i"}},
+                                  {"name": {"$regex": id, "$options": "i"}}]} if id else {},
+                         {"_id": 0, "deleted_at": 0, "updated_at": 0, "trial_date": 0},
+                         limit=limit).sort({"name": 1})
         result = []
         for company in cursor:
-            result.append({"name": company["name"], "id": company["uid"]})
-        return result
-    except:
-        return {"error": "Invalid query"}
-
+            db = heka_database.get_database_collection("organization")
+            org_list = []
+            cursor2 = db.find({"company_id": company["uid"]},
+                              {"name": 1, "_id": 0})
+            for org in cursor2:
+                org_list.append(org["name"])
+            additionals = {"customer_list": ",".join(org_list),
+                           "customer_count": len(org_list)}
+            result.append(company | additionals)
+        return to_json_serializable_doc(result)
+    except Exception as e:
+        return {"error": f"Invalid query: {e}"}
 
 @tool
-def query_organizations_by_company_id(
-    company_id: str = "grumatic-default",
-) -> List[dict]:
-    """Query about heka organization information by company id in heka"""
+def get_customer_info(id: str = None, limit: int = 1) -> List[dict]:
+    "Get MSP(Managed Service Provider)'s customer information in heka database"
     try:
-        cursor = heka_organization_db.find(
-            {"delete_at": None, "company_id": company_id}
-        )
         result = []
+        db = heka_database.get_database_collection("organization")
+        cursor = db.find({"$or": [{"uid": id}, {"name": id},
+                                  {"uid": {"$regex": id, "$options": "i"}},
+                                  {"name": {"$regex": id, "$options": "i"}}]} if id else {},
+                         {"_id": 0},
+                         limit=limit).sort({"name": 1})
         for org in cursor:
-            filtered_org = {
-                key: org[key]
-                for key in [
-                    "company_id",
-                    "name",
-                    "representative",
-                    "business_location",
-                    "telephone",
-                    # "cloud_accounts",
-                    # "billing_custom",
-                    "last_invoiced",
-                ]
-            } | {"id": org["uid"]}
-            result.append(filtered_org)
-        return result
-    except:
-        return {"error": "Invalid query"}
+            invoice_collections = [cloud_account["csp"]+"_invoice" for cloud_account in org["cloud_accounts"]]
+            for coll in invoice_collections:
+                db = heka_database.get_database_collection(coll)
+                cursor2 = db.find({"organization_id": org["uid"]},
+                                  {"invoice_id": 1, "status": 1, "created_at": 1, "_id": 0},
+                                  limit=0)
+                invoices = [item for item in cursor2]
+                org = org | {f"{coll}s": invoices}
+            result.append(org)
 
+        # fallback that id is for msp company
+        return to_json_serializable_doc(result) if result else get_msp_info.invoke({"id": id})
+    except Exception as e:
+        return {"error": f"Invalid query: {e}"}
 
 @tool
-def query_user_by_email(email: str) -> dict:
-    """Query about user information by email in heka"""
+def get_invoice_info(id: str, status: Literal["Origin", "Paid", "Unissued", "Invoiced"] = "Origin") -> List[dict]:
+    "Get billing invoice information in heka database"
     try:
-        result = heka_user_db.find_one({"email": email})
-        return result
-    except:
-        return {"error": "Invalid query"}
-
-
-@tool
-def query_aws_invoice_by_invoice_id(invoice_id: str) -> dict:
-    """Query about AWS invoice information by invoice id in heka"""
-    try:
-        result = heka_aws_invoice_db.find_one({"invoice_id": invoice_id})
-        return result.pop("data")
-    except:
-        return {"error": "Invalid query"}
-
-
-@tool
-def query_aws_invoice_by_organization_id(
-    organization_id: str, status: str = "Origin"
-) -> List[dict]:
-    """Query about a list of AWS invoice by organization id and status in heka"""
-    try:
-        cursor = heka_aws_invoice_db.find(
-            {
-                "delete_at": None,
-                "status": status,
-                "organization_id": organization_id,
-            }
-        )
         result = []
-        for item in cursor:
-            filtered_item = {
-                key: item[key]
-                for key in [
-                    "company_id",
-                    "organization_id",
-                    "account_id",
-                    "total_cost",
-                    "org_total_cost",
-                ]
-            } | {"id": item["invoice_id"]}
-            result.append(filtered_item)
-        return result
-    except:
-        return {"error": "Invalid query"}
+        for coll in ["aws_invoice", "nhn_invoice"]:
+            db = heka_database.get_database_collection(coll)
+            for invoice in db.find({"invoice_id": {"$regex": id, "$options": "i"},
+                                    "status": status}, {"_id": 0}).sort({"invoice_id": -1}):
+                result.append(invoice)
+        return to_json_serializable_doc(result)
+    except Exception as e:
+        return {"error": f"Invalid query: {e}"}
 
-    # test
-    # query_user({'email': "grmt-root@grumatic.com"})
+@tool
+def mongo_find(collection_name:str, query:dict = {}, projection:dict = {}, limit:int = 30) -> Union[List[dict], str]:
+    """Useful to query some information using mongo find operation for NOSQL database.
+    Make query and projection parameters according to mongo find specification.
+    Use a limit parameter to restict the number of query results.
+    """
+    result = heka_database.find(collection_name, query=query, projection=projection, limit=limit)
+    return to_json_serializable_doc(result)
 
+@tool
+def mongo_aggregate(collection_name:str, pipeline:List[dict] = []) -> Union[List[dict], str]:
+    """Useful to query some information using mongo aggregate operation from NOSQL database.
+    Make a pipeline parameter according to mongo aggregation specification.
+    """
+    result = heka_database.aggregate(collection_name, pipeline=pipeline)
+    return to_json_serializable_doc(result)
 
-if os.getenv("LANGSMITH_LANGGRAPH_DESKTOP"):
-    # LangGraph Studio Docker Container
-    CHROMA_DB_DIR = "/deps/__outer_agent/agent/chroma-db"
-else:
-    # Agent-Service-Tool Docker Container
-    CHROMA_DB_DIR = "/app/agent/chroma-db"
+@tool
+def mongo_count_documents(collection_name:str, filter:dict = {}) -> int:
+    """Useful to count the total number of documents in collection from NOSQL database.
+    Make a filter parameter to count documents according to mongo specification.
+    """
+    result = heka_database.count_documents(collection_name)
+    return to_json_serializable_doc(result)
 
-CHROMA_COLLECTION_NAME = "rag-chroma"
+mongo_tools = [mongo_find, mongo_aggregate, mongo_count_documents]
 
-# from langchain_nomic.embeddings import NomicEmbeddings
-# CHROMA_EMBEDDING = NomicEmbeddings(
-#     model="nomic-embed-text-v1.5", inference_mode="local"
-# )
+@tool
+def mongo_query(user_question:str) -> List[dict] | dict | str:
+    #, state: Annotated[dict, InjectedState], config: RunnableConfig):
+    "Perform mongo database query for user question by using operations like 'find', 'aggregate', 'count_documents'. Used for complex NOSQL query operations. Provide the user question which might be original user input or one revised by LLM."
+    #print(f"*** state: {state}")
+    #print(f"*** config: {config}")
+    from langchain_openai import ChatOpenAI
+    from agent.mongo_agent import run_structured_chat_agent
+    llm = ChatOpenAI(temperature=0, model_name="gpt-4o-mini")
+    database_schema = get_schema_info.invoke({})
 
-CHROMA_EMBEDDING = OpenAIEmbeddings(model="text-embedding-3-large")
+    # context = []
+    # from langchain_core.messages import HumanMessage, AIMessage
+    # for msg in state["messages"]:
+    #     if isinstance(msg, HumanMessage):
+    #         context.append(f"Question: {msg.content}")
+    #     elif isinstance(msg, AIMessage):
+    #         context.append(f"Answer: {msg.content}")
 
-vectorstore = Chroma(
-    collection_name=CHROMA_COLLECTION_NAME,
-    persist_directory=CHROMA_DB_DIR,
-    embedding_function=CHROMA_EMBEDDING,
-)
+    result = run_structured_chat_agent(user_question, database_schema, llm=llm, tools=mongo_tools)
+    return to_json_serializable_doc(result)
 
-retriever = vectorstore.as_retriever()
+# # Creating StructuredTool objects for insertion and extraction functions
+# tool_extract = StructuredTool.from_function(heka_database.perform_extraction)
+# # ...
+# tool_query: BaseTool = tool(heka_database.perform_extraction)
+# tool_query.name = "ToolQuery"
 
-from langchain.tools.retriever import create_retriever_tool
-
-retriever_tool = create_retriever_tool(
-    retriever,
-    "grumatic_heka_retriever",
-    "Searches and returns excerpts from heka solutions by Grumatic (그루매틱 헤카 솔루션)",
-)
-
-tools = [
-    retriever_tool,
-    calculator,
-    #    arxiv_search,
-    #    web_search,
-    TavilySearchResults(max_results=1),
-    get_all_companies,
-    query_organizations_by_company_id,
-    query_user_by_email,
-    query_aws_invoice_by_invoice_id,
-    query_aws_invoice_by_organization_id,
+db_tools = [
+    get_schema_info,
+    get_user_info,
+    get_msp_info,
+    get_customer_info,
+    get_invoice_info,
+    mongo_query,
 ]
+
+all_tools = search_tools + db_tools

@@ -1,14 +1,19 @@
 from typing import Dict, Any, List, Literal
 from langchain_core.messages import (
-    BaseMessage, HumanMessage, AIMessage,
-    ToolMessage, ToolCall,
-    message_to_dict, messages_from_dict,
+    BaseMessage,
+    HumanMessage,
+    AIMessage,
+    ToolMessage,
+    ToolCall,
+    message_to_dict,
+    messages_from_dict,
 )
 from pydantic import BaseModel, Field
 
 
 class UserInput(BaseModel):
     """Basic user input for the agent."""
+
     message: str = Field(
         description="User input to the agent.",
         examples=["What is the weather in Tokyo?"],
@@ -27,6 +32,7 @@ class UserInput(BaseModel):
 
 class StreamInput(UserInput):
     """User input for streaming the agent's response."""
+
     stream_tokens: bool = Field(
         description="Whether to stream LLM tokens to the client.",
         default=True,
@@ -35,18 +41,26 @@ class StreamInput(UserInput):
 
 class AgentResponse(BaseModel):
     """Response from the agent when called via /invoke."""
+
     message: Dict[str, Any] = Field(
         description="Final response from the agent, as a serialized LangChain message.",
-        examples=[{'message':
-                   {'type': 'ai', 'data':
-                     {'content': 'The weather in Tokyo is 70 degrees.', 'type': 'ai'}
-                   }
-                 }],
+        examples=[
+            {
+                "message": {
+                    "type": "ai",
+                    "data": {
+                        "content": "The weather in Tokyo is 70 degrees.",
+                        "type": "ai",
+                    },
+                }
+            }
+        ],
     )
 
 
 class ChatMessage(BaseModel):
     """Message in a chat."""
+
     type: Literal["human", "ai", "tool"] = Field(
         description="Role of the message.",
         examples=["human", "ai", "tool"],
@@ -80,7 +94,9 @@ class ChatMessage(BaseModel):
         original = message_to_dict(message)
         match message:
             case HumanMessage():
-                human_message = cls(type="human", content=message.content, original=original)
+                human_message = cls(
+                    type="human", content=message.content, original=original
+                )
                 return human_message
             case AIMessage():
                 ai_message = cls(type="ai", content=message.content, original=original)
@@ -96,8 +112,10 @@ class ChatMessage(BaseModel):
                 )
                 return tool_message
             case _:
-                raise ValueError(f"Unsupported message type: {message.__class__.__name__}")
-    
+                raise ValueError(
+                    f"Unsupported message type: {message.__class__.__name__}"
+                )
+
     def to_langchain(self) -> BaseMessage:
         """Convert the ChatMessage to a LangChain message."""
         if self.original:
@@ -116,6 +134,7 @@ class ChatMessage(BaseModel):
 
 class Feedback(BaseModel):
     """Feedback for a run, to record to LangSmith."""
+
     run_id: str = Field(
         description="Run ID to record feedback for.",
         examples=["847c6285-8fc9-4560-a83f-4e6285809254"],
@@ -131,5 +150,5 @@ class Feedback(BaseModel):
     kwargs: Dict[str, Any] = Field(
         description="Additional feedback kwargs, passed to LangSmith.",
         default={},
-        examples=[{'comment': 'In-line human feedback'}],
+        examples=[{"comment": "In-line human feedback"}],
     )

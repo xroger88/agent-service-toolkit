@@ -1,5 +1,5 @@
-from agent.research_assistant import research_assistant
+from agent.heka_agent import heka_agent
 
 __all__ = [
-    "research_assistant"
+    "heka_agent"
 ]

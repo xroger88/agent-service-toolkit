@@ -9,7 +9,7 @@
     "."
   ],
   "graphs": {
-    "research_assistant": "./research_assistant.py:research_assistant"
+    "heka_agent": "./heka_agent.py:heka_agent"
   },
   "env": "../.env"
 }
