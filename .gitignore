@@ -171,3 +171,4 @@ cython_debug/
 #.idea/
 /agent/chroma-db/
 /agent/files/
+/cache.db
