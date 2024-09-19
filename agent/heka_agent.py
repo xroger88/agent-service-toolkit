@@ -1,6 +1,6 @@
 import os
 import pprint
-from typing import TypedDict, Literal, Annotated
+from typing import TypedDict, Literal, Annotated, Union
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from openai import RateLimitError
@@ -19,11 +19,18 @@ from langgraph.graph import END, StateGraph, MessagesState
 from langgraph.managed import IsLastStep
 from langgraph.prebuilt import ToolNode
 
-from agent.tools import all_tools
 from agent.llama_guard import llama_guard, LlamaGuardOutput
 
 from langchain.globals import set_llm_cache, set_debug
 from langchain.cache import SQLiteCache
+
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
+from langchain.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
+
+from agent.tools import all_tools, get_schema_info, mongo_aggregate, retriever
+from agent import heka_database
 
 # for debugging langgraph
 #set_debug(True)
@@ -47,15 +54,20 @@ set_llm_cache(SQLiteCache(database_path="cache.db"))
 
 import operator
 class AgentState(MessagesState):
+    user_question: str
+    parsed_question: dict
+    unique_names: list[str]
+    generated_query: dict
+    query_result: Union[list[dict], dict, str]
+    query_result_relevance: str
+    # -----
     query_history: Annotated[list[dict], operator.add]
     summary: str
     safety: LlamaGuardOutput
     #is_last_step: IsLastStep
 
-from langchain.memory import ConversationSummaryMemory
-from langchain.chains import ConversationChain
-
-
+# from langchain.memory import ConversationSummaryMemory
+# from langchain.chains import ConversationChain
 # def create_ChatOpenAI(model="gpt-4o-mini", max_retries=0):
 #     memory = ConversationSummaryMemory(
 #         llm=ChatOpenAI(model=model, temperature=0), return_messages=True
@@ -95,31 +107,6 @@ class GraphConfig(TypedDict):
 
 
 current_date = datetime.now().strftime("%B %d, %Y")
-
-instructions = f"""
-    You are a helpful assistant as an expert on heka product service which is
-    a kind of cloud cost billing automation and optimization solution provided by Grumatic company.
-    You can find some data via database query, document retrieval, web search, etc.
-    You can provide useful insights about how to optimize the cloud cost.
-
-    Take a step by step approach to make an anwser for the questions.
-    Do consider the query history given in the context before using retriever or web search
-    Do explain rationale about why you choose such an answer.
-
-    Today's date is {current_date}.
-
-    NOTE: THE USER CAN'T SEE THE TOOL RESPONSE.
-
-    A few things to remember:
-    - Please include markdown-formatted links to any citations used in your response. Only include one
-    or two citations per response unless more are needed. ONLY USE LINKS RETURNED BY THE TOOLS.
-    - Use calculator tool with numexpr to answer math questions. The user does not understand numexpr,
-      so for the final response, use human readable format - e.g. "300 * 200", not "(300 \\times 200)".
-    - Use a retriever tool to get the documents related to grumatic company, and its heka solutions
-      for Managed Service Provider(MSP), FinOps.
-    - Use web search tool to search the web for information.
-    - Use query tools to get specific information about heka users, companies, organizations, invoices
-    """
 
 def get_remove_messages(messages: list):
     "메시지 히스토리에서 ToolMessage 메시지 및 AIMessage 메지지 중에서 tool_calls가 있는 경우 제거하기 위한 RemoveMessage 리스트 출력"
@@ -175,12 +162,9 @@ def call_summarize_conversation(state: AgentState, config: RunnableConfig):
 #     return {"query_history": [{'query': last_message.content,
 #                                'result': str(response)}]}
 
-from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
-from agent.tools import get_schema_info, get_user_info, get_msp_info, get_customer_info, mongo_aggregate
-
-
-def parse_question(question):
+def parse_question(state: AgentState, config: RunnableConfig):
+    question = state["messages"][-1].content
+    llm = models[config["configurable"].get("model", "gpt-4o-mini")]
     prompt = ChatPromptTemplate.from_messages([
         ("system", '''You are a data analyst that can help summarize NOSQL document collctions and parse user questions about a database.
 Given the question and database schema, identify the relevant collections and attributes.
@@ -228,28 +212,29 @@ The "name_attributes" field should contain only the attributes that are relevant
 
     for name in response["names"]:
         try:
-            user_info_list = get_user_info.invoke({"id": name})
+            user_info_list = heka_database.get_user_info(id=name)
             response["user_info"] = user_info_list[0]
         except:
             try:
-                msp_info_list = get_msp_info.invoke({"id": name})
+                msp_info_list = heka_database.get_company_info(id=name)
                 response["msp_info"] = msp_info_list[0]
             except:
                 try:
-                    customer_info_list = get_customer_info.invoke({"id": name})
+                    customer_info_list = heka_database.get_organization_info(id=name)
                     response["customer_info"] = customer_info_list[0]
                 except:
                     continue
 
-    return response
+    return {"user_question": question, "parsed_question": response}
 
 
-from agent import heka_database
-
-def get_unique_names(parsed_question) -> dict:
+def get_unique_names(state: AgentState):
     """Find unique names in relevant collections and attributes."""
-    #parsed_question = state['parsed_question']
 
+    # FIX
+    return {"unique_names": []}
+
+    parsed_question = state['parsed_question']
     if not parsed_question['is_relevant']:
         return {"unique_names": []}
 
@@ -273,43 +258,45 @@ def get_unique_names(parsed_question) -> dict:
     return {"unique_names": list(unique_names)}
 
 
-def generate_nosql_query(question):
-    from langchain.output_parsers import PydanticOutputParser
-    from pydantic import BaseModel, Field
+class GenerateQueryResponse(BaseModel):
+    collection_name: str = Field(description="collection name for query")
+    query: list = Field(description="It must be a list")
 
-    class Response(BaseModel):
-        collection_name: str = Field(description="collection name for query")
-        pipeline: list = Field(description="It must be a list")
+    def to_dict(self):
+        return {"collection_name": self.collection_name,
+                "query": self.query}
 
-        def to_dict(self):
-            return {"collection_name": self.collection_name,
-                    "pipeline": self.pipeline}
+generate_query_output_parser = PydanticOutputParser(pydantic_object=GenerateQueryResponse)
 
-    parser = PydanticOutputParser(pydantic_object=Response)
+
+def generate_query(state: AgentState, config: RunnableConfig):
+    question = state["user_question"]
+    llm = models[config["configurable"].get("model", "gpt-4o-mini")]
 
     def populate_partial_variables() -> dict:
-        return {"format_instructions": parser.get_format_instructions()}
+        return {"format_instructions": generate_query_output_parser.get_format_instructions(),
+                "current_date": current_date}
 
 
-    parsed_question = parse_question(question)
+    parsed_question = state["parsed_question"]
     # use match statement and inside match don't use `id` instead of `id` use "user_id" with the value of "{user_id}"
-
     prompt = PromptTemplate(
         template = """
         Create a MongoDB raw aggregation pipeline for the following user question:
         ###{question}###
 
-        This is database schema : "{db_schema}"
-        This is schema description : ${schema_description}$
+        Today's date is {current_date}.
 
-        ### Here is Given Query Context ###
-        Your user information : ${user_info}$
-        Your company information : ${msp_info}$
-        Your organization information : ${customer_info}$
+        This is relevant database schema : ${db_schema}$
+
+        ### Here is question-related context information ###
+        User: ${user_info}$
+        Company: ${msp_info}$
+        Organization: ${customer_info}$
 
         ### add multiple instruction based on your requirenment
-        DO not use the attributes which do not exist in the schema like 'customer_list, 'customer_count'.
         DO not use 'refresh_tokens', 'password' in user collection for security purpose.
+        Do not use preamble and explanation in json output
 
         Just return the [] of aggregration pipeline.
         The following is the format instructions.
@@ -320,21 +307,64 @@ def generate_nosql_query(question):
         partial_variables=populate_partial_variables(),
     )
     llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
-    chain = prompt | llm | JsonOutputParser() #| mongo_aggregate
+    chain = prompt | llm | JsonOutputParser()
+    relevant_schema = [{item["collection_name"]: item["attributes"]} for item in parsed_question["relevant_collections"]]
     response = chain.invoke({"question": question,
-                             "db_schema": get_schema_info.invoke({}),
-                             "schema_description": None,
+                             "db_schema": relevant_schema,
                              "user_info": parsed_question.get("user_info", None),
                              "msp_info": parsed_question.get("msp_info", None),
                              "customer_info": parsed_question.get("customer_info", None),
                              })
-    #heka_database.aggregate(response["collection_name"], response["pipeline"])
-    #mongo_aggregate.invoke({"collection_name": response["collection_name"],
-    #                               "pipeline": response["pipeline"]})
-    return response
+    return {"generated_query": response}
 
 
+def execute_query(state: AgentState, config: RunnableConfig):
+    question = state["user_question"]
+    llm = models[config["configurable"].get("model", "gpt-4o-mini")]
 
+    generated_query = state["generated_query"]
+    query_result = mongo_aggregate.invoke({"collection_name": generated_query["collection_name"],
+                                           "pipeline": generated_query["query"]})
+
+    prompt = PromptTemplate(
+        template="""You are a validator for database query result. \n
+        Here is the query result: \n\n {query_result} \n\n
+        Give a binary score 'yes' or 'no' to indicate whether the query result is valid. \n
+        Provide the binary score as a JSON with a single key 'score' and no premable or explanation. \n
+        If the query result is empty or [], grade it as not valid. \n
+        If the query result contains 'error' word, grade it as not valid. \n
+        """,
+        input_variables=["question", "query_result"],
+    )
+    grader = prompt | llm | JsonOutputParser()
+    relevance = grader.invoke({"question": question, "query_result": query_result})
+
+    return {"query_result": query_result,
+            "query_result_relevance": relevance["score"]}
+
+
+def answer_with_query_result(state: AgentState, config: RunnableConfig):
+    question = state["user_question"]
+    llm = models[config["configurable"].get("model", "gpt-4o-mini")]
+
+    query_result = state["query_result"]
+
+    prompt = PromptTemplate(
+        template="""You are a helpful assistant in answering user question based on the database query result. \n
+        This is about Heka database query result. \n
+
+        Here is the user question: {question} \n
+        Here is the query result: \n\n {query_result} \n\n
+
+        First, describe the query result for user question in markdown format.
+        Second, answer the question by interpreting the query result.
+        Third, guide user to rewrite question in order to get better query result if result is not enough to answer.
+        """,
+        input_variables=["question", "query_result"],
+    )
+    chain = prompt | llm
+    response = chain.invoke({"question": question, "query_result": query_result})
+    return {"messages": [AIMessage(content=response.content)]}
 
 def route_question(question):
     prompt = PromptTemplate(
@@ -350,8 +380,6 @@ def route_question(question):
     llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
     router = prompt | llm | JsonOutputParser()
     return router.invoke({"question": question})
-
-from agent.tools import retriever
 
 def grade_documents(question):
     prompt = PromptTemplate(
@@ -370,11 +398,39 @@ def grade_documents(question):
     doc_txt = [doc.page_content for doc in docs[:3]]
     return grader.invoke({"question": question, "document": doc_txt})
 
+
+    # Take a step by step approach to make an anwser for the questions.
+    # Do consider the query history given in the context before using retriever or web search
+    # Do explain rationale about why you choose such an answer.
+
+    # - Use calculator tool with numexpr to answer math questions. The user does not understand numexpr,
+    #   so for the final response, use human readable format - e.g. "300 * 200", not "(300 \\times 200)".
+
+instruction_prompt = PromptTemplate(
+    template="""
+    You are a helpful assistant as an expert on heka product service which is
+    a kind of cloud cost billing automation and optimization solution provided by Grumatic company.
+    You can find some data via database query, document retrieval, web search, etc.
+    You can provide useful insights about how to optimize the cloud cost.
+
+    Today's date is {current_date}.
+
+    NOTE: THE USER CAN'T SEE THE TOOL RESPONSE.
+
+    A few things to remember:
+    - Please include markdown-formatted links to any citations used in your response. Only include one
+    or two citations per response unless more are needed. ONLY USE LINKS RETURNED BY THE TOOLS.
+    """,
+    input_variables=["current_date"],
+    )
+
 def modify_state(state: AgentState):
     summary = state.get("summary", "")
     summary_message = f'#Summary of conversation earlier: {summary}.\nUse the summariezd text for answering the questions.'
     query_history = state.get("query_history", [])
     query_history_message = f'#Query History: {query_history}.\nUse the query history for answering the questions.'
+
+    instructions = instruction_prompt.invoke({"current_date": current_date}).text
 
     if summary and query_history:
         system_message = f"{instructions}\n\n {summary} \n\n {query_history_message}"
@@ -397,7 +453,7 @@ def wrap_model(model: BaseChatModel):
     return preprocessor | model.with_retry(retry_if_exception_type=(RateLimitError,))
 
 
-async def acall_model(state: AgentState, config: RunnableConfig):
+async def acall_agent(state: AgentState, config: RunnableConfig):
     m = models[config["configurable"].get("model", "gpt-4o-mini")]
     model_runnable = wrap_model(m)
     pprint.PrettyPrinter(indent=4, width=80).pprint(state["messages"])
@@ -473,8 +529,13 @@ agent = StateGraph(AgentState, config_schema=GraphConfig)
 # agent.add_node("chat_history", call_chat_history)
 # agent.add_node("mongo_agent", call_mongo_agent)
 # agent.add_node("summarize_conversation", call_summarize_conversation)
-agent.add_node("model", acall_model)
 
+agent.add_node("parse_question", parse_question)
+agent.add_node("get_unique_names", get_unique_names)
+agent.add_node("generate_query", generate_query)
+agent.add_node("execute_query", execute_query)
+agent.add_node("answer_with_query_result", answer_with_query_result)
+agent.add_node("agent", acall_agent)
 from langgraph.pregel import RetryPolicy
 agent.add_node("tools", ToolNode(all_tools), retry=RetryPolicy(max_attempts=3))
 # agent.add_node("tools", call_tool)
@@ -489,7 +550,7 @@ agent.add_node("tools", ToolNode(all_tools), retry=RetryPolicy(max_attempts=3))
 
 # agent.set_entry_point("mongo_agent")
 # agent.add_edge("mongo_agent", "model")
-agent.set_entry_point("model")
+agent.set_entry_point("parse_question")
 
 # # We now define the logic for determining whether to end or summarize the conversation
 # def should_summarize(state: State) -> Literal["summarize_conversation", END]:
@@ -519,8 +580,38 @@ agent.set_entry_point("model")
 # Always END after blocking unsafe content
 # agent.add_edge("block_unsafe_content", END)
 
+
+def checking_database_relevance(state: AgentState) -> Literal["yes", "no"]:
+    parse_question = state["parsed_question"]
+    if parse_question["is_relevant"]:
+        return "yes"
+    else:
+        return "no"
+
+agent.add_conditional_edges("parse_question",
+                            checking_database_relevance,
+                            {"yes": "get_unique_names",
+                             "no": "agent"})
+
+agent.add_edge("get_unique_names", "generate_query")
+agent.add_edge("generate_query", "execute_query")
+
+def checking_query_result_relevance(state: AgentState) -> Literal["yes", "no"]:
+    relevance = state["query_result_relevance"]
+    if relevance == "yes":
+        return "yes"
+    else:
+        return "no"
+
+agent.add_conditional_edges("execute_query",
+                            checking_query_result_relevance,
+                            {"yes": "answer_with_query_result",
+                             "no": "agent"})
+
+agent.add_edge("answer_with_query_result", END)
+
 # Always run "model" after "tools"
-agent.add_edge("tools", "model")
+agent.add_edge("tools", "agent")
 
 # After "model", if there are tool calls, run "tools". Otherwise END.
 def pending_tool_calls(state: AgentState) -> Literal["tools", END]:
@@ -531,7 +622,7 @@ def pending_tool_calls(state: AgentState) -> Literal["tools", END]:
         return END
 
 agent.add_conditional_edges(
-    "model",
+    "agent",
     pending_tool_calls,
     {"tools": "tools",
      END: END}

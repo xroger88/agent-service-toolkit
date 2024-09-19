@@ -115,23 +115,14 @@ def get_schema_info() -> dict:
 
     return extracted_dict
 
+
 @tool
 def get_user_info(id: str = None, limit: int = 1) -> List[dict]:
     "Get user information in heka database"
     try:
-        db = heka_database.get_database_collection("user")
-        cursor = db.find({"deactivate": False,
-                          "$or": [{"uid": id}, {"email": id}, {"first_name": id}, {"last_name": id},
-                                  {"uid": {"$regex": id, "$options": "i"}},
-                                  {"email":{"$regex": id, "$options": "i"}},
-                                  {"first_name": {"$regex": id, "$options": "i"}},
-                                  {"last_name": {"$regex": id, "$options": "i"}},
-                                  ],
-                          } if id else {},
-                         {"_id": 0, "refresh_tokens": 0, "password": 0},
-                         limit=limit).sort({"email": 1})
+        users = heka_database.get_user_info(id, limit)
         result = []
-        for user in cursor:
+        for user in users:
             db = heka_database.get_database_collection("company")
             company_id = user["company_id"]
             company_info = db.find_one({"uid": company_id}, {"name": 1})
@@ -153,16 +144,11 @@ def get_user_info(id: str = None, limit: int = 1) -> List[dict]:
 
 @tool
 def get_msp_info(id: str = None, limit: int = 1) -> List[dict]:
-    "Get MSP(Managed Service Provider) information in heka database"
+    "Get Managed Service Provider(MSP) information in heka database"
     try:
-        db = heka_database.get_database_collection("company")
-        cursor = db.find({"$or": [{"uid": id}, {"name": id},
-                                  {"uid": {"$regex": id, "$options": "i"}},
-                                  {"name": {"$regex": id, "$options": "i"}}]} if id else {},
-                         {"_id": 0, "deleted_at": 0, "updated_at": 0, "trial_date": 0},
-                         limit=limit).sort({"name": 1})
+        companies = heka_database.get_company_info(id, limit)
         result = []
-        for company in cursor:
+        for company in companies:
             db = heka_database.get_database_collection("organization")
             org_list = []
             cursor2 = db.find({"company_id": company["uid"]},
@@ -178,23 +164,19 @@ def get_msp_info(id: str = None, limit: int = 1) -> List[dict]:
 
 @tool
 def get_customer_info(id: str = None, limit: int = 1) -> List[dict]:
-    "Get MSP(Managed Service Provider)'s customer information in heka database"
+    "Get customer information in heka database"
     try:
+        orgs = heka_database.get_organization_info(id, limit)
         result = []
-        db = heka_database.get_database_collection("organization")
-        cursor = db.find({"$or": [{"uid": id}, {"name": id},
-                                  {"uid": {"$regex": id, "$options": "i"}},
-                                  {"name": {"$regex": id, "$options": "i"}}]} if id else {},
-                         {"_id": 0},
-                         limit=limit).sort({"name": 1})
-        for org in cursor:
+        for org in orgs:
             invoice_collections = [cloud_account["csp"]+"_invoice" for cloud_account in org["cloud_accounts"]]
             for coll in invoice_collections:
                 db = heka_database.get_database_collection(coll)
-                cursor2 = db.find({"organization_id": org["uid"]},
-                                  {"invoice_id": 1, "status": 1, "created_at": 1, "_id": 0},
-                                  limit=0)
-                invoices = [item for item in cursor2]
+                cursor2 = db.find({"organization_id": org["uid"],
+                                   "status": "Origin"},
+                                  {"invoice_id": 1, "_id": 0},
+                                  limit=0).sort({"invoice_id": -1}).limit(12)
+                invoices = [item["invoice_id"] for item in cursor2]
                 org = org | {f"{coll}s": invoices}
             result.append(org)
 
@@ -210,7 +192,7 @@ def get_invoice_info(id: str, status: Literal["Origin", "Paid", "Unissued", "Inv
         result = []
         for coll in ["aws_invoice", "nhn_invoice"]:
             db = heka_database.get_database_collection(coll)
-            for invoice in db.find({"invoice_id": {"$regex": id, "$options": "i"},
+            for invoice in db.find({"$or": [{"invoice_id": id}, {"invoice_id": {"$regex": id, "$options": "i"}}],
                                     "status": status}, {"_id": 0}).sort({"invoice_id": -1}):
                 result.append(invoice)
         return to_json_serializable_doc(result)
@@ -278,7 +260,7 @@ db_tools = [
     get_msp_info,
     get_customer_info,
     get_invoice_info,
-    mongo_query,
+#    mongo_query,
 ]
 
 all_tools = search_tools + db_tools

@@ -90,6 +90,54 @@ def get_schema(database_name: str = DEFAULT_DB_NAME):
     # Return the schema of all collections in the database
     return all_schemas
 
+def get_user_info(id: str = None, limit: int = 1) -> List[dict]:
+    "Get user information in heka database"
+    try:
+        db = get_database_collection("user")
+        cursor = db.find({"deactivate": False,
+                          "$or": [{"uid": id}, {"email": id}, {"first_name": id}, {"last_name": id},
+                                  {"uid": {"$regex": id, "$options": "i"}},
+                                  {"email":{"$regex": id, "$options": "i"}},
+                                  {"first_name": {"$regex": id, "$options": "i"}},
+                                  {"last_name": {"$regex": id, "$options": "i"}},
+                                  ],
+                          } if id else {},
+                         {"_id": 0, "refresh_tokens": 0, "password": 0},
+                         limit=limit).sort({"email": 1})
+
+        result = [user for user in cursor]
+        return result
+    except Exception as e:
+        return {"error": f"Invalid query: {e}"}
+
+def get_company_info(id: str = None, limit: int = 1) -> List[dict]:
+    "Get company information in heka database"
+    try:
+        db = get_database_collection("company")
+        cursor = db.find({"$or": [{"uid": id}, {"name": id},
+                                  {"uid": {"$regex": id, "$options": "i"}},
+                                  {"name": {"$regex": id, "$options": "i"}}]} if id else {},
+                         {"_id": 0, "deleted_at": 0, "updated_at": 0, "trial_date": 0},
+                         limit=limit).sort({"name": 1})
+        result = [company for company in cursor]
+        return result
+    except Exception as e:
+        return {"error": f"Invalid query: {e}"}
+
+def get_organization_info(id: str = None, limit: int = 1) -> List[dict]:
+    "Get organization information in heka database"
+    try:
+        db = get_database_collection("organization")
+        cursor = db.find({"$or": [{"uid": id}, {"name": id},
+                                  {"uid": {"$regex": id, "$options": "i"}},
+                                  {"name": {"$regex": id, "$options": "i"}}]} if id else {},
+                         {"_id": 0},
+                         limit=limit).sort({"name": 1})
+        result = [org for org in cursor]
+        return result
+    except Exception as e:
+        return {"error": f"Invalid query: {e}"}
+
 
 # def insert(insert_data, collection_name, database_name: str = DEFAULT_DB_NAME):
 #     # Access the database using the global CLIENT instance and DATABASE_NAME
