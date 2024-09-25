@@ -1,6 +1,7 @@
 import asyncio
 import os
 import json
+import uuid
 from typing import AsyncGenerator, List
 import pprint
 
@@ -23,7 +24,7 @@ from schema import ChatMessage
 
 APP_TITLE = "Heka AI Agent"
 APP_ICON = "🧰"
-
+HEKA_LOGO = "https://cdn.grumatic.com/assets/heka/logo-aws-mp.png"
 
 @st.cache_resource
 def get_agent_client():
@@ -34,8 +35,11 @@ def get_agent_client():
 async def main():
     st.set_page_config(
         page_title=APP_TITLE,
-        page_icon=APP_ICON,
-        menu_items={},
+        page_icon=HEKA_LOGO,
+        menu_items={'Get help': 'https://www.grumatic.com',
+                    #'About': "Grumatic Heka Solution",
+                    },
+        layout="centered"
     )
 
     # Hide the streamlit upper-right chrome
@@ -43,10 +47,15 @@ async def main():
         """
         <style>
         [data-testid="stStatusWidget"] {
-                visibility: hidden;
-                height: 0%;
-                position: fixed;
-            }
+          visibility: hidden;
+          height: 0%;
+          position: fixed;
+        }
+
+        img {
+          background: white;
+        }
+
         </style>
         """,
     )
@@ -62,59 +71,90 @@ async def main():
     }
     # Config options
     with st.sidebar:
-        st.header(f"{APP_ICON} {APP_TITLE}")
-        ""
-        "Welcome to Heka Service"
+        st.image(image=HEKA_LOGO)
+        #st.header(f"{APP_ICON} {APP_TITLE}")
+        st.html("<div style='text-align:center;font-size:1.3em'>Welcome Heka AI Agent</div>")
         with st.popover(":material/settings: Settings", use_container_width=True):
             m = st.radio("LLM to use", options=models.keys())
             model = models[m]
             use_streaming = st.toggle("Stream results", value=True)
 
-        # @st.dialog("Architecture")
-        # def architecture_dialog():
-        #     st.image(
-        #         "https://github.com/JoshuaC215/agent-service-toolkit/blob/main/media/agent_architecture.png?raw=true"
-        #     )
-        #     "[View full size on Github](https://github.com/JoshuaC215/agent-service-toolkit/blob/main/media/agent_architecture.png)"
-        #     st.caption(
-        #         "App hosted on [Streamlit Cloud](https://share.streamlit.io/) with FastAPI service running in [Azure](https://learn.microsoft.com/en-us/azure/app-service/)"
-        #     )
+#         @st.dialog("Question Samples")
+#         def question_samples_dialog():
+#             st.caption(
+#                 """
+# - 헤카란 무엇인가? or what is heka?
+# - 그루매틱 회사의 비전은 무엇인가? or what is the vision of Grumatic?
+# - 그루매틱의 성장 전력은 무엇인가? or what is the growth strategy of Grumatic company?
+# - 헤카 서비스를 사용하는 회사 목록을 알려줘 or what companies are using heka?
+# - what organizations are there for company id f3b74b5cc9614419922dd6e0ad074f28
+# - can you make a report for the invoice id 20240716009 in terms of cloud cost usage?
+# - can you compare details for invoice id 202406623666 and 202407623666 in terms of cost usage?
+# """
+#             )
 
-        # if st.button(":material/schema: Architecture", use_container_width=True):
-        #     architecture_dialog()
+#         if st.button("Question Samples", use_container_width=True):
+#             question_samples_dialog()
 
-        @st.dialog("Example Questions")
-        def example_questions_dialog():
-            st.caption(
-                """
-- 헤카란 무엇인가? or what is heka?
-- 그루매틱 회사의 비전은 무엇인가? or what is the vision of Grumatic?
-- 그루매틱의 성장 전력은 무엇인가? or what is the growth strategy of Grumatic company?
-- 헤카 서비스를 사용하는 회사 목록을 알려줘 or what companies are using heka?
-- what organizations are there for company id f3b74b5cc9614419922dd6e0ad074f28
-- can you make a report for the invoice id 20240716009 in terms of cloud cost usage?
-- can you compare details for invoice id 202406623666 and 202407623666 in terms of cost usage?
-"""
-            )
-
-        if st.button("Example Questions", use_container_width=True):
-            example_questions_dialog()
+        with st.popover(":material/questions:", use_container_width=True):
+            st.json(
+                {"Grumatic and Heka Solution":
+                 {
+                     "Q1": "Who is Grumatic?",
+                     "Q2": "What is heka solution?",
+                     "Q3": "What is the vision of Grumatic?",
+                     "Q4": "What is the growth strategy of Grumatic company?",
+                 },
+                 "Heka Users, MSPs, Customers":
+                 {
+                     "Q1": "What MSP companies are in heka?",
+                     "Q2": "What users are in heka?",
+                     "Q3": "How many customers are in heka?",
+                     "Q4": "What customers are managed by Grumatic?",
+                     "Q4": "In database, Can you provide a list of all users registered in (주)콤텍시스템 along with their roles?"
+                 },
+                 "Heka Invoices":
+                 {
+                     "Q1": "let me know the invoices of 삼프로TV in last month",
+                     "Q2": "let me knwo the invoices of 삼프로TV from 2024.1 to 2024.8",
+                     "Q3": "In database, let me know the aws invoices of 삼프로TV in last month, limit to 1",
+                 }
+                 }, expanded=True)
 
         with st.popover(":material/policy: Privacy", use_container_width=True):
             st.write(
                 "Prompts, responses and feedback in this app are anonymously recorded and saved to LangSmith for product evaluation and improvement purposes only."
             )
-        "[Heka Home](https://www.heka.so)"
-        # "[View the source code](https://github.com/JoshuaC215/agent-service-toolkit)"
-        st.caption(
-            "Powered by Grumatic"
-            # "Made with :material/favorite: by [Joshua](https://www.linkedin.com/in/joshua-k-carroll/) in Oakland"
-        )
+        st.html(
+            """
+            <div style='text-align:center;'>
+              <hr/>
+              <div>
+               <a href="https://www.heka.so" target="_blank">Heka Home</a>
+               &nbsp & &nbsp
+               <a href="https://msp.dev.heka.so" target="_blank">Heka MSP</a>
+              </div>
+              <p></p>
+              <p> Powered by Grumatic Inc. </p>
+            </div>
+            """)
+
 
     # Draw existing messages
     if "messages" not in st.session_state:
         st.session_state.messages = []
     messages: List[ChatMessage] = st.session_state.messages
+
+    if "thread_id" not in st.session_state:
+        st.session_state["thread_id"] = str(uuid.uuid4())
+
+    def new_thread_clicked():
+        st.session_state.thread_id = str(uuid.uuid4())
+        st.session_state.messages = []
+
+    col1, col2 = st.columns([8,1])
+    with col2:
+        st.button("New", help="New Thread", on_click=new_thread_clicked)
 
     if len(messages) == 0:
         WELCOME = "Hello! I'm an AI-powered assistant providing the information about Grumatic company and their Heka solution for cloud cost billing automation and optimization. I may take a few seconds to boot up when you send your first message. Ask me anything!"
@@ -137,7 +177,8 @@ async def main():
             stream = agent_client.astream(
                 message=input,
                 model=model,
-                thread_id=get_script_run_ctx().session_id,
+                #thread_id=get_script_run_ctx().session_id,
+                thread_id=st.session_state.thread_id
             )
             await draw_messages(stream, is_new=True)
         else:
@@ -290,7 +331,7 @@ async def draw_messages(
                 status.write("Output:")
                 try:
                     json_content = json.loads(msg.content)
-                    status.write(msg.content, expanded=1)
+                    status.json(msg.content, expanded=1)
                 except ValueError:
                     status.write(msg.content)
                 status.update(state="complete")

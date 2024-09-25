@@ -90,49 +90,172 @@ def get_schema(database_name: str = DEFAULT_DB_NAME):
     # Return the schema of all collections in the database
     return all_schemas
 
-def get_user_info(id: str = None, limit: int = 1) -> List[dict]:
+
+@lru_cache
+def get_unique_names():
+    """Find unique names in collections."""
+
+    collections = [{"collection_name": "user",
+                    "name_attributes": ["first_name", "last_name"]},
+                   {"collection_name": "company",
+                    "name_attributes": ["name"]},
+                   {"collection_name": "organization",
+                    "name_attributes": ["name"]}]
+
+    unique_names = {}
+    for coll_info in collections:
+        coll_name = coll_info['collection_name']
+        db = get_database_collection(coll_name)
+        name_attributes = coll_info['name_attributes']
+        names = set()
+        if name_attributes:
+            projection = {}
+            for attr in name_attributes:
+                projection[attr] = 1
+            results = db.find({"delete_at": None},
+                              {"_id": 0 } | projection)
+            for doc in results:
+                names.update(str(value) for key, value in doc.items() if value)
+        unique_names[coll_name] = list(names)
+
+    return unique_names
+
+
+def get_user_info(id: str = None, limit: int = 1, details: bool = True) -> List[dict]:
     "Get user information in heka database"
     try:
         db = get_database_collection("user")
-        cursor = db.find({"deactivate": False,
-                          "$or": [{"uid": id}, {"email": id}, {"first_name": id}, {"last_name": id},
-                                  {"uid": {"$regex": id, "$options": "i"}},
-                                  {"email":{"$regex": id, "$options": "i"}},
-                                  {"first_name": {"$regex": id, "$options": "i"}},
-                                  {"last_name": {"$regex": id, "$options": "i"}},
-                                  ],
-                          } if id else {},
-                         {"_id": 0, "refresh_tokens": 0, "password": 0},
-                         limit=limit).sort({"email": 1})
+        query = {"deactivate": False,
+                 "$or": [{"uid": id}, {"email": id}, {"first_name": id}, {"last_name": id},
+                         {"uid": {"$regex": id, "$options": "i"}},
+                         {"email":{"$regex": id, "$options": "i"}},
+                         {"first_name": {"$regex": id, "$options": "i"}},
+                         {"last_name": {"$regex": id, "$options": "i"}},
+                         ],
+                 } if id else {}
+        if details:
+            cursor = db.find(query,
+                             {"_id": 0, "refresh_tokens": 0, "password": 0},
+                             limit=limit).sort({"email": 1})
+        else:
+            cursor = db.find(query,
+                             {"_id": 0,
+                              "uid": 1, "created_at": 1, "deactivate": 1,
+                              "email": 1, "company_id": 1,
+                              "department": 1, "title": 1,
+                              "phone_number": 1, "roles": 1, "organizations": 1,
+                              "last_login": 1, "first_name": 1, "last_name": 1,
+                              }, limit=limit).sort({"email": 1})
 
         result = [user for user in cursor]
         return result
     except Exception as e:
         return {"error": f"Invalid query: {e}"}
 
-def get_company_info(id: str = None, limit: int = 1) -> List[dict]:
+def get_user_info_by_company_name(company_name: str, limit: int = 1, details: bool = True) -> List[dict]:
+    """
+    Get the users of a company (MSP) in heka database.
+    """
+    try:
+        db = get_database_collection("company")
+        company = db.find_one({"name": company_name}, {"_id": 0, "uid": 1})
+        if not company:
+            return None
+
+        db = get_database_collection("user")
+        query = {"company_id": company["uid"]}
+
+        if details:
+            cursor = db.find(query,
+                             {"_id": 0, "refresh_tokens": 0, "password": 0},
+                             limit=limit).sort({"email": 1})
+        else:
+            cursor = db.find(query,
+                             {"_id": 0,
+                              "uid": 1, "created_at": 1, "deactivate": 1,
+                              "email": 1, "company_id": 1,
+                              "department": 1, "title": 1,
+                              "phone_number": 1, "roles": 1, "organizations": 1,
+                              "last_login": 1, "first_name": 1, "last_name": 1,
+                              }, limit=limit).sort({"email": 1})
+
+        result = [user for user in cursor]
+        return result
+    except Exception as e:
+        return {"error": f"Invalid query: {e}"}
+
+
+def get_company_info(id: str = None, limit: int = 1, details: bool = True) -> List[dict]:
     "Get company information in heka database"
     try:
         db = get_database_collection("company")
-        cursor = db.find({"$or": [{"uid": id}, {"name": id},
-                                  {"uid": {"$regex": id, "$options": "i"}},
-                                  {"name": {"$regex": id, "$options": "i"}}]} if id else {},
-                         {"_id": 0, "deleted_at": 0, "updated_at": 0, "trial_date": 0},
-                         limit=limit).sort({"name": 1})
+        query = {"$or": [{"uid": id}, {"name": id},
+                         {"uid": {"$regex": id, "$options": "i"}},
+                         {"name": {"$regex": id, "$options": "i"}}]} if id else {}
+        if details:
+            cursor = db.find(query,
+                             {"_id": 0, "deleted_at": 0, "updated_at": 0, "trial_date": 0,
+                              }, limit=limit).sort({"name": 1})
+        else:
+            cursor = db.find(query,
+                             {"_id": 0, "uid": 1, "created_at": 1, "deactivate": 1,
+                              "name": 1, "email": 1, "representative": 1,
+                              "address": 1, "telephone": 1, "website": 1,
+                              }, limit=limit).sort({"name": 1})
+
         result = [company for company in cursor]
         return result
     except Exception as e:
         return {"error": f"Invalid query: {e}"}
 
-def get_organization_info(id: str = None, limit: int = 1) -> List[dict]:
+def get_organization_info(id: str = None, limit: int = 1, details: bool = True) -> List[dict]:
     "Get organization information in heka database"
     try:
         db = get_database_collection("organization")
-        cursor = db.find({"$or": [{"uid": id}, {"name": id},
-                                  {"uid": {"$regex": id, "$options": "i"}},
-                                  {"name": {"$regex": id, "$options": "i"}}]} if id else {},
-                         {"_id": 0},
-                         limit=limit).sort({"name": 1})
+        query = {"$or": [{"uid": id}, {"name": id},
+                         {"uid": {"$regex": id, "$options": "i"}},
+                         {"name": {"$regex": id, "$options": "i"}}]} if id else {}
+        if details:
+            cursor = db.find(query,
+                             {"_id": 0, "deleted_at": 0, "updated_at": 0,
+                              }, limit=limit).sort({"name": 1})
+        else:
+            cursor = db.find(query,
+                             {"_id": 0, "uid": 1, "created_at": 1, "status": 1,
+                              "name": 1, "representative": 1, "website": 1,
+                              "company_id": 1, "telephone": 1, "business_location": 1,
+                              "cloud_accounts": 1, "last_invoiced": 1,
+                              }, limit=limit).sort({"name": 1})
+
+        result = [org for org in cursor]
+        return result
+    except Exception as e:
+        return {"error": f"Invalid query: {e}"}
+
+def get_organization_info_by_company_name(company_name: str, limit: int = 1, details: bool = True) -> List[dict]:
+    """
+    Get the organizations of a company (MSP) in heka database.
+    """
+    try:
+        db = get_database_collection("company")
+        company = db.find_one({"name": company_name}, {"_id": 0, "uid": 1})
+        if not company:
+            return None
+
+        db = get_database_collection("organization")
+        query = {"company_id": company["uid"]}
+        if details:
+            cursor = db.find(query,
+                             {"_id": 0, "deleted_at": 0, "updated_at": 0,
+                              }, limit=limit).sort({"name": 1})
+        else:
+            cursor = db.find(query,
+                             {"_id": 0, "uid": 1, "created_at": 1, "status": 1,
+                              "name": 1, "representative": 1, "website": 1,
+                              "company_id": 1, "telephone": 1, "business_location": 1,
+                              "cloud_accounts": 1, "last_invoiced": 1,
+                              }, limit=limit).sort({"name": 1})
+
         result = [org for org in cursor]
         return result
     except Exception as e:

@@ -5,13 +5,13 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel
 from langchain_core.runnables import RunnableParallel, RunnablePassthrough
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 
 # from langchain_nomic.embeddings import NomicEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 CHROMA_DB_DIR = "./chroma-db"
-CHROMA_COLLECTION_NAME = "rag-chroma"
+CHROMA_COLLECTION_NAME = "grumatic_heka"
 # CHROMA_EMBEDDING = NomicEmbeddings(
 #     model="nomic-embed-text-v1.5", inference_mode="local"
 # )
@@ -23,14 +23,25 @@ urls = [
     "https://www.heka.so/feature/customer",
     "https://www.heka.so/feature/billing-portal",
     "https://www.heka.so/about",
+    "https://grumatic.notion.site/heka-Guide-document-f9920ef200184661a32e5239553e751f",
 ]
 
 pdfs = [
-    "./files/dev_rules.pdf",
-    "./files/grumatic_intro_202406.pdf",
+    "./files/grumatic_intro_202409_for_comtec.pdf",
+    "./files/heka_v2_documentation.pdf",
+    "./files/HK-heka_MSP_-_Product_Requirement_Document-250924-054956.pdf",
+    "./files/HK-Cloud_Service_Invoicing_Workflow-250924-055111.pdf",
+    "./files/HK-Functional_Requirements_for_Customers-250924-055210.pdf",
+    "./files/HK-Functional_Requirements_for_MSP-250924-055138.pdf",
+    "./files/HK-Invoice_Requirements-250924-055245.pdf",
+    "./files/finops_edu_and_intro_v1_1_for_harim.pdf",
 ]
+# [
+#     "./files/dev_rules.pdf",
+#     "./files/grumatic_intro_202406.pdf",
+# ]
 
-DO_INJEST = True
+DO_INJEST = False
 
 if DO_INJEST:
     web_docs = [WebBaseLoader(url).load() for url in urls]
@@ -93,10 +104,10 @@ class Question(BaseModel):
 chain = chain.with_types(input_type=Question)
 
 sample_questions = [
-    "what is the basic ground rules for developers?",
     "what is heka?",
     "what kinds of features heka provides?",
     "what is the vision of Grumatic?",
+    "what is the FinOps Strategy of Grumatic?"
 ]
 
 if __name__ == "__main__":

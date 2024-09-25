@@ -42,7 +42,7 @@ class AgentClient:
         Returns:
             AnyMessage: The response from the agent
         """
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(read_bufsize=8*2**16) as session:
             request = UserInput(message=message)
             if thread_id:
                 request.thread_id = thread_id
@@ -79,7 +79,7 @@ class AgentClient:
         if model:
             request.model = model
         response = requests.post(
-            f"{self.base_url}/invoke", json=request.dict(), headers=self._headers
+            f"{self.base_url}/invoke", json=request.dict(), headers=self._headers,
         )
         if response.status_code == 200:
             return ChatMessage.parse_obj(response.json())
@@ -178,14 +178,14 @@ class AgentClient:
         Returns:
             AsyncGenerator[ChatMessage | str, None]: The response from the agent
         """
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(read_bufsize=8*2**16) as session:
             request = StreamInput(message=message, stream_tokens=stream_tokens)
             if thread_id:
                 request.thread_id = thread_id
             if model:
                 request.model = model
             async with session.post(
-                f"{self.base_url}/stream", json=request.dict(), headers=self._headers
+                    f"{self.base_url}/stream", json=request.dict(), headers=self._headers,
             ) as response:
                 if response.status != 200:
                     raise Exception(
@@ -193,6 +193,7 @@ class AgentClient:
                     )
                 # Parse incoming events with the SSE protocol
                 async for line in response.content:
+                    #print(f"*** line: {line}")
                     if line.decode("utf-8").strip():
                         parsed = self._parse_stream_line(line)
                         if parsed is None:

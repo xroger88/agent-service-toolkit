@@ -3,6 +3,7 @@ import math
 import numexpr
 import re
 import json
+from datetime import datetime
 from langchain_core.tools import tool, BaseTool, create_retriever_tool
 from langchain_core.runnables.config import RunnableConfig
 from langchain.tools import StructuredTool
@@ -33,7 +34,8 @@ else:
 if os.getenv("HOME") == "/Users/xroger88":
     CHROMA_DB_DIR = "/Users/xroger88/Projects/Grumatic/llm/agent-service-toolkit/agent/chroma-db"
 
-CHROMA_COLLECTION_NAME = "rag-chroma"
+#CHROMA_COLLECTION_NAME = "rag-chroma"
+CHROMA_COLLECTION_NAME = "grumatic_heka"
 
 # from langchain_nomic.embeddings import NomicEmbeddings
 # CHROMA_EMBEDDING = NomicEmbeddings(
@@ -59,7 +61,7 @@ search_tools = [
     retriever_tool,
     arxiv_search,
     # web_search,
-    TavilySearchResults(max_results=1),
+    TavilySearchResults(name="web_search", max_results=3),
 ]
 
 
@@ -117,10 +119,38 @@ def get_schema_info() -> dict:
 
 
 @tool
-def get_user_info(id: str = None, limit: int = 1) -> List[dict]:
-    "Get user information in heka database"
+def check_if_name_exists(name:str) -> Union[dict, None]:
+    """
+    Check the name exists as user, company, organization in heka database.
+    """
+
+    unique_names = heka_database.get_unique_names()
+
+    result = {}
+
+    for coll, names in unique_names.items():
+        if name in names:
+            result[coll+"_name"] = name
+
+    return result if result else None
+
+@tool
+def get_user_info(id: str = None, limit: int = 5) -> Union[List[dict], dict]:
+    """
+    Get user information registered in heka database.
+    The input parameter 'id' could be user's uid, name or email.
+    If 'id' is None, return the total number of users and the data of available users.
+    Otherwise, return the data of users matched to 'id'
+    """
     try:
-        users = heka_database.get_user_info(id, limit)
+        users = heka_database.get_user_info(id, limit=limit, details=False)
+
+        if id is None:
+            result = {"total_users": heka_database.count_documents("user"),
+                      "user_count_limit": limit,
+                      "user_info": [user for user in users]}
+            return to_json_serializable_doc(result)
+
         result = []
         for user in users:
             db = heka_database.get_database_collection("company")
@@ -142,11 +172,36 @@ def get_user_info(id: str = None, limit: int = 1) -> List[dict]:
     except Exception as e:
         return {"error": f"Invalid query: {e}"}
 
+
 @tool
-def get_msp_info(id: str = None, limit: int = 1) -> List[dict]:
-    "Get Managed Service Provider(MSP) information in heka database"
+def get_user_info_by_company_name(company_name: str, limit: int = 5) -> Union[List[dict], dict]:
+    """
+    Get the user information of a MSP company in heka database.
+    The input parameter 'company_name' could be company's name or MSP's name.
+    """
+
+    result = heka_database.get_user_info_by_company_name(company_name, limit=limit)
+    return to_json_serializable_doc(result)
+
+
+@tool
+def get_msp_info(id: str = None, limit: int = 5) -> Union[List[dict], dict]:
+    """
+    Get Managed Service Provider(MSP) company information in heka database.
+    The input parameter 'id' could be company's uid, name or email.
+    If 'id' is None, return the total number of MSP companies and the data of available companies.
+    Otherwise, return the data of MSP companies matched to 'id'
+    """
+
     try:
-        companies = heka_database.get_company_info(id, limit)
+        companies = heka_database.get_company_info(id, limit=limit, details=False)
+
+        if id is None:
+            result = {"total_companies": heka_database.count_documents("company"),
+                      "company_count_limit": limit,
+                      "company_info": [company for company in companies]}
+            return to_json_serializable_doc(result)
+
         result = []
         for company in companies:
             db = heka_database.get_database_collection("organization")
@@ -163,10 +218,23 @@ def get_msp_info(id: str = None, limit: int = 1) -> List[dict]:
         return {"error": f"Invalid query: {e}"}
 
 @tool
-def get_customer_info(id: str = None, limit: int = 1) -> List[dict]:
-    "Get customer information in heka database"
+def get_customer_info(id: str = None, limit: int = 5) -> Union[List[dict], dict]:
+    """
+    Get customer organization information in heka database.
+    The input parameter 'id' could be organization's uid, name or email.
+    If 'id' is None, return the total number of customer organizations and the data of available organizations.
+    Otherwise, return the data of customer organization matched to 'id'
+    """
+
     try:
-        orgs = heka_database.get_organization_info(id, limit)
+        orgs = heka_database.get_organization_info(id, limit=limit, details=False)
+
+        if id is None:
+            result = {"total_organizations": heka_database.count_documents("organization"),
+                      "organization_count_limit": limit,
+                      "organization_info": [org for org in orgs]}
+            return to_json_serializable_doc(result)
+
         result = []
         for org in orgs:
             invoice_collections = [cloud_account["csp"]+"_invoice" for cloud_account in org["cloud_accounts"]]
@@ -180,21 +248,101 @@ def get_customer_info(id: str = None, limit: int = 1) -> List[dict]:
                 org = org | {f"{coll}s": invoices}
             result.append(org)
 
-        # fallback that id is for msp company
-        return to_json_serializable_doc(result) if result else get_msp_info.invoke({"id": id})
+        return to_json_serializable_doc(result)
     except Exception as e:
         return {"error": f"Invalid query: {e}"}
 
 @tool
-def get_invoice_info(id: str, status: Literal["Origin", "Paid", "Unissued", "Invoiced"] = "Origin") -> List[dict]:
-    "Get billing invoice information in heka database"
+def get_customer_info_by_company_name(company_name: str, limit: int = 5) -> Union[List[dict], dict]:
+    """
+    Get the customer organization information of a MSP company in heka database.
+    The input parameter 'company_name' could be company's name or MSP's name.
+    """
+
+    result = heka_database.get_organization_info_by_company_name(company_name, limit=limit)
+    return to_json_serializable_doc(result)
+
+
+@tool
+def get_invoice_info(id: str,
+                     status: Union[Literal["Origin", "Paid", "Unissued", "Invoiced"], None] = None) -> List[dict]:
+    "Get the invoice information associated by invoice id in heka database"
     try:
         result = []
         for coll in ["aws_invoice", "nhn_invoice"]:
             db = heka_database.get_database_collection(coll)
-            for invoice in db.find({"$or": [{"invoice_id": id}, {"invoice_id": {"$regex": id, "$options": "i"}}],
-                                    "status": status}, {"_id": 0}).sort({"invoice_id": -1}):
+            if status is None:
+                query = {"$or": [{"invoice_id": id},
+                                 {"invoice_id": {"$regex": id, "$options": "i"}}]}
+            else:
+                query = {"$or": [{"invoice_id": id},
+                                 {"invoice_id": {"$regex": id, "$options": "i"}}],
+                         "status": status}
+
+            for invoice in db.find(query, {"_id": 0, "data": 0}).sort({"invoice_id": -1}):
                 result.append(invoice)
+
+        return to_json_serializable_doc(result)
+    except Exception as e:
+        return {"error": f"Invalid query: {e}"}
+
+@tool
+def get_invoice_info_by_organization_name(organization_name: str,
+                                          limit: int = 5,
+                                          start_date: str = None,
+                                          end_date: str = None) -> List[dict]:
+    "Get the invoice information associated by organization name in heka database"
+    try:
+        db = heka_database.get_database_collection("organization")
+        org = db.find_one({"name": organization_name}, {"_id": 0, "uid": 1})
+        if not org:
+            return None
+
+        result = []
+        if start_date:
+            start_date = datetime.fromisoformat(start_date)
+
+        if end_date:
+            end_date = datetime.fromisoformat(end_date)
+
+        query = {"organization_id": org["uid"]}
+        if start_date and end_date:
+            query = query | {"created_at": {"$gte": start_date,
+                                            "$lte": end_date}}
+        elif start_date:
+            query = query | {"created_at": {"$gte": start_date}}
+        elif end_date:
+            query = query | {"created_at": {"$lte": end_date}}
+
+        for coll in ["aws_invoice", "nhn_invoice"]:
+            db = heka_database.get_database_collection(coll)
+            for invoice in db.find(query, {"_id": 0, "data": 0}).sort({"invoice_id": -1}).limit(limit):
+                result.append(invoice)
+
+        return to_json_serializable_doc(result)
+    except Exception as e:
+        return {"error": f"Invalid query: {e}"}
+
+
+@tool
+def get_invoice_data(id: str,
+                     status: Union[Literal["Origin", "Paid", "Unissued", "Invoiced"], None] = None) -> List[dict]:
+    "Get the detailed cost usage data for invoice in heka database"
+    try:
+        result = []
+        for coll in ["aws_invoice", "nhn_invoice"]:
+            db = heka_database.get_database_collection(coll)
+            if status is None:
+                query = {"$or": [{"invoice_id": id},
+                                 {"invoice_id": {"$regex": id, "$options": "i"}}]}
+            else:
+                query = {"$or": [{"invoice_id": id},
+                                 {"invoice_id": {"$regex": id, "$options": "i"}}],
+                         "status": status}
+
+            for invoice in db.find(query, {"_id": 0, "invoice_id": 1, "status": 1, "data": 1}).sort({"invoice_id": -1}):
+                result.append(invoice)
+
         return to_json_serializable_doc(result)
     except Exception as e:
         return {"error": f"Invalid query: {e}"}
@@ -256,10 +404,15 @@ def mongo_query(user_question:str) -> List[dict] | dict | str:
 
 db_tools = [
     get_schema_info,
+    check_if_name_exists,
     get_user_info,
+    get_user_info_by_company_name,
     get_msp_info,
     get_customer_info,
+    get_customer_info_by_company_name,
     get_invoice_info,
+    get_invoice_info_by_organization_name,
+    get_invoice_data,
 #    mongo_query,
 ]
 

@@ -1,6 +1,6 @@
 import os
 import pprint
-from typing import TypedDict, Literal, Annotated, Union
+from typing import TypedDict, Literal, Annotated, Union, List
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from openai import RateLimitError
@@ -29,8 +29,9 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 
-from agent.tools import all_tools, get_schema_info, mongo_aggregate, retriever
+from agent.tools import all_tools, get_schema_info, mongo_aggregate, retriever, check_if_name_exists
 from agent import heka_database
+from agent.util import convert_date_item_to_datetime_obj
 
 # for debugging langgraph
 #set_debug(True)
@@ -56,15 +57,14 @@ import operator
 class AgentState(MessagesState):
     user_question: str
     parsed_question: dict
-    unique_names: list[str]
-    generated_query: dict
+    generated_queries: list[dict]
     query_result: Union[list[dict], dict, str]
     query_result_relevance: str
     # -----
     query_history: Annotated[list[dict], operator.add]
     summary: str
     safety: LlamaGuardOutput
-    #is_last_step: IsLastStep
+    is_last_step: IsLastStep
 
 # from langchain.memory import ConversationSummaryMemory
 # from langchain.chains import ConversationChain
@@ -162,31 +162,35 @@ def call_summarize_conversation(state: AgentState, config: RunnableConfig):
 #     return {"query_history": [{'query': last_message.content,
 #                                'result': str(response)}]}
 
+def route_question(state: AgentState, config: RunnableConfig):
+    question = state["messages"][-1].content
+    llm = models[config["configurable"].get("model", "gpt-4o-mini")]
+    prompt = PromptTemplate(
+        template="""You are an expert at routing a user question to a database or agent.
+        Use the database only if user explicitly mentions 'database' in the question.
+        Otherwise, use agent. Give a binary choice 'database' or 'agent' based on the question.
+        Return the a JSON with a single key 'route' and no premable or explanation.
+        Question to route: {question}""",
+        input_variables=["question"],
+    )
+    router = prompt | llm | JsonOutputParser()
+    response = router.invoke({"question": question})
+    return response["route"]
+
 def parse_question(state: AgentState, config: RunnableConfig):
     question = state["messages"][-1].content
     llm = models[config["configurable"].get("model", "gpt-4o-mini")]
     prompt = ChatPromptTemplate.from_messages([
-        ("system", '''You are a data analyst that can help summarize NOSQL document collctions and parse user questions about a database.
+        ("system", '''You are a data analyst that can help summarize NOSQL document collections and parse user questions about heka database.
 Given the question and database schema, identify the relevant collections and attributes.
-If the question is not relevant to the database or if there is not enough information to answer the question, set is_relevant to false.
 
-# A few things to remember about database schema:
-    - Company is a Managed Service Provider (MSP) that provides cloud management service for their customers.
-    - Organization is a customer that are companies specially using cloud management service.
-    - There are Cloud Service Providers (CSP) such as 'aws', 'gcp', 'azure', 'nhn', 'ncloud', etc. Each customer can use cloud computing resources provided by multiple CSPs.
-    - Invoice is the billing information of cloud cost usage monthly issued to organizations (customers).
-
-# Use the following synonym dictionary for interpreting user question into the terms of database schema:
-    {{
-      "user": ["사용자", "유저"],
-      "company": ["회사", "MSP", "Managed Service Provider"],
-      "organization": ["고객", "고객사", "Customer"],
-      "invoice": ["청구", "청구서", "bill"],
-    }}
+[Database Schema]
+${schema}$
 
 Your response should be in the following JSON format:
 {{
     "is_relevant": boolean,
+    "is_invoice_related": boolean,
     "names": [string],
     "relevant_collections": [
         {{
@@ -197,68 +201,36 @@ Your response should be in the following JSON format:
     ]
 }}
 
-If the question includes names for user or company or organization, fill up the names in the response format. Do not convert name, for example, "(주)주식회사" to "주)주식회사".
-
-The "name_attributes" field should contain only the attributes that are relevant to the question and contain "name" word in their attribute name, for example, the attribute "first_name" in "user" collection contains names relevant to the question "what users are there?", but the attributes like "uid", "address", "business_location" are not relevant because it does not contain "name".
+[Notes]
+- If the question is not relevant to the database or if there is not enough information to answer the question, set is_relevant to false.
+- If the question is related to invoice, set is_invoice_related to true.
+- If the question includes names for user or company or organization, fill up the names in the response format. Do not convert name, for example, "(주)주식회사" to "주)주식회사".
+- If you are not sure the names are about company or organization, then include both company and orgarnization collections in relevant collections.
+- If you are not sure the invoice in question is releted to which one of multiple invoice collections, then include all invoice collections in relevant collections.
+- The "name_attributes" field should contain only the attributes that are relevant to the question and contain "name" word in their attribute name, for example, the attribute "first_name" in "user" collection contains names relevant to the question "what users are there?", but the attributes like "uid", "address", "business_location" are not relevant because it does not contain "name".
 '''),
-        ("human", "===Database schema:\n{schema}\n\n===User question:\n{question}\n\nIdentify relevant collections and attributes:")
+        ("human", "===USER QUESTION: {question}\n\n Identify relevant collections and attributes:")
         ])
 
-    llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
     chain = prompt | llm | JsonOutputParser()
     response = chain.invoke({"question": question,
                              "schema": get_schema_info.invoke({}),
                              })
 
+    if not response["names"]:
+        # no names found, not enough information
+        response["is_relevant"] = False
+
+
+    names = []
     for name in response["names"]:
-        try:
-            user_info_list = heka_database.get_user_info(id=name)
-            response["user_info"] = user_info_list[0]
-        except:
-            try:
-                msp_info_list = heka_database.get_company_info(id=name)
-                response["msp_info"] = msp_info_list[0]
-            except:
-                try:
-                    customer_info_list = heka_database.get_organization_info(id=name)
-                    response["customer_info"] = customer_info_list[0]
-                except:
-                    continue
+        names.append(check_if_name_exists.invoke({"name": name}))
+    response["names"] = names
 
     return {"user_question": question, "parsed_question": response}
 
 
-def get_unique_names(state: AgentState):
-    """Find unique names in relevant collections and attributes."""
-
-    # FIX
-    return {"unique_names": []}
-
-    parsed_question = state['parsed_question']
-    if not parsed_question['is_relevant']:
-        return {"unique_names": []}
-
-    unique_names = set()
-    for coll_info in parsed_question['relevant_collections']:
-        coll_name = coll_info['collection_name']
-        name_attributes = coll_info['name_attributes']
-
-        if name_attributes:
-            projection = {}
-            for attr in name_attributes:
-                projection[attr] = 1
-            results = heka_database.find(coll_name,
-                                         query={},
-                                         projection={"_id": 0 } | projection,
-                                         limit= 0)
-            print(results)
-            for doc in results:
-                unique_names.update(str(value) for key, value in doc.items() if value)
-
-    return {"unique_names": list(unique_names)}
-
-
-class GenerateQueryResponse(BaseModel):
+class QueryResponse(BaseModel):
     collection_name: str = Field(description="collection name for query")
     query: list = Field(description="It must be a list")
 
@@ -266,84 +238,123 @@ class GenerateQueryResponse(BaseModel):
         return {"collection_name": self.collection_name,
                 "query": self.query}
 
-generate_query_output_parser = PydanticOutputParser(pydantic_object=GenerateQueryResponse)
 
+# class GenerateQueryResponse(BaseModel):
+#     queries: List[QueryResponse]
+
+#     def to_dict(self):
+#         return self.queries
+
+generate_query_output_parser = PydanticOutputParser(pydantic_object=QueryResponse)
 
 def generate_query(state: AgentState, config: RunnableConfig):
     question = state["user_question"]
     llm = models[config["configurable"].get("model", "gpt-4o-mini")]
 
-    def populate_partial_variables() -> dict:
-        return {"format_instructions": generate_query_output_parser.get_format_instructions(),
-                "current_date": current_date}
-
-
     parsed_question = state["parsed_question"]
     # use match statement and inside match don't use `id` instead of `id` use "user_id" with the value of "{user_id}"
     prompt = PromptTemplate(
+        # - CREATE EACH QUERY for multiple invoice collections are relevant
         template = """
-        Create a MongoDB raw aggregation pipeline for the following user question:
+        Create a MongoDB raw aggregation query for the following question:
         ###{question}###
 
-        Today's date is {current_date}.
+        [Database Schema]
+        ${db_schema}$
 
-        This is relevant database schema : ${db_schema}$
+        Today Date is {current_date}
 
-        ### Here is question-related context information ###
-        User: ${user_info}$
-        Company: ${msp_info}$
-        Organization: ${customer_info}$
+        [Query Context]
+        ${names}
 
-        ### add multiple instruction based on your requirenment
-        DO not use 'refresh_tokens', 'password' in user collection for security purpose.
-        Do not use preamble and explanation in json output
+        [Aggregation Pipeline]
+        - if company name is in context, do look up 'company_id' with the 'uid' of company collection and match to the company name
+        - if orgarnization name is in context, do look up 'organization_id' with the 'uid' of organization collection and match to the organization name
+        - do project the attributes like {{attribute_name: 1, ...}}
+        - do limit the number of output documents to be not too big in the last stage
 
-        Just return the [] of aggregration pipeline.
-        The following is the format instructions.
+        [Notes]
+        - DO USE $date type for date field instead of ISODate
+        - DO NOT USE $dateToString
+        - DO NOT USE 'refresh_tokens', 'password' in user collection for security purpose
+        - DO NOT USE preamble and explanation in json output
+
+        The follow is output format instructions:
         ***{format_instructions}***
         """,
-        input_variables=["question", "db_schema", "schema_description",
-                         "user_info", "msp_info", "customer_info"],
-        partial_variables=populate_partial_variables(),
+        input_variables=["question", "db_schema", "names"],
+        partial_variables={"format_instructions": generate_query_output_parser.get_format_instructions(),
+                           "current_date": current_date},
     )
-    llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
-    chain = prompt | llm | JsonOutputParser()
-    relevant_schema = [{item["collection_name"]: item["attributes"]} for item in parsed_question["relevant_collections"]]
+
+    chain = prompt | llm | generate_query_output_parser
+    relevant_schema = {}
+    for item in parsed_question["relevant_collections"]:
+        relevant_schema.update({item["collection_name"]: item["attributes"]})
+
+    if parsed_question["is_invoice_related"]:
+        aws_invoice = relevant_schema.get("aws_invoice", None)
+        nhn_invoice = relevant_schema.get("nhn_invoice", None)
+        if aws_invoice and nhn_invoice:
+            relevant_schema.pop("aws_invoice")
+            relevant_schema.pop("nhn_invoice")
+            responses = []
+            for coll, attrs in {"aws_invoice": aws_invoice, "nhn_invoice": nhn_invoice}.items():
+                response = chain.invoke({"question": question,
+                                         "db_schema": relevant_schema | {coll: attrs},
+                                         "names": parsed_question["names"]
+                                         })
+                if response:
+                    responses.append(response)
+            return {"generated_queries": responses}
+
     response = chain.invoke({"question": question,
                              "db_schema": relevant_schema,
-                             "user_info": parsed_question.get("user_info", None),
-                             "msp_info": parsed_question.get("msp_info", None),
-                             "customer_info": parsed_question.get("customer_info", None),
+                             "names": parsed_question["names"]
                              })
-    return {"generated_query": response}
 
+    return {"generated_queries": [response]}
 
 def execute_query(state: AgentState, config: RunnableConfig):
     question = state["user_question"]
     llm = models[config["configurable"].get("model", "gpt-4o-mini")]
 
-    generated_query = state["generated_query"]
-    query_result = mongo_aggregate.invoke({"collection_name": generated_query["collection_name"],
-                                           "pipeline": generated_query["query"]})
+    generated_queries = state["generated_queries"]
+    query_result = []
+    for item in generated_queries:
+        if item:
+            # convert {"$date": "xxx"} to datetime.fromisoformat('xxx')
+            converted_query = convert_date_item_to_datetime_obj(item.query)
+            result = mongo_aggregate.invoke({"collection_name": item.collection_name,
+                                             "pipeline": converted_query})
+            # skip if the result type is str, it measn some error
+            if result and not isinstance(result, str):
+                query_result.append(result)
 
-    prompt = PromptTemplate(
-        template="""You are a validator for database query result. \n
-        Here is the query result: \n\n {query_result} \n\n
-        Give a binary score 'yes' or 'no' to indicate whether the query result is valid. \n
-        Provide the binary score as a JSON with a single key 'score' and no premable or explanation. \n
-        If the query result is empty or [], grade it as not valid. \n
-        If the query result contains 'error' word, grade it as not valid. \n
-        """,
-        input_variables=["question", "query_result"],
-    )
-    grader = prompt | llm | JsonOutputParser()
-    relevance = grader.invoke({"question": question, "query_result": query_result})
+    # prompt = PromptTemplate(
+    #     template="""You are a validator for database query result. \n
+    #     Here is the query result: \n\n {query_result} \n\n
+    #     Give a binary score 'yes' or 'no' to indicate whether the query result is valid. \n
+    #     Provide the binary score as a JSON with a single key 'score' and no premable or explanation. \n
+    #     If the query result is empty or [], grade it as not valid. \n
+    #     If the query result contains 'error' word, grade it as not valid. \n
+    #     """,
+    #     input_variables=["question", "query_result"],
+    # )
+    # grader = prompt | llm | JsonOutputParser()
+    # relevance = grader.invoke({"question": question, "query_result": query_result})
 
-    return {"query_result": query_result,
-            "query_result_relevance": relevance["score"]}
+    # return {"query_result": query_result,
+    #         "query_result_relevance": relevance["score"]}
+
+    if query_result:
+        return {"query_result": query_result, "query_result_relevance": "yes"}
+    else:
+        ai_message = "No result for database query due to no actual result or not enough information to properly query from your question. Try it more using tools."
+        return {"query_result_relevance": "no", "messages": [AIMessage(content=ai_message)]}
 
 
-def answer_with_query_result(state: AgentState, config: RunnableConfig):
+def generate_answer(state: AgentState, config: RunnableConfig):
     question = state["user_question"]
     llm = models[config["configurable"].get("model", "gpt-4o-mini")]
 
@@ -358,28 +369,13 @@ def answer_with_query_result(state: AgentState, config: RunnableConfig):
 
         First, describe the query result for user question in markdown format.
         Second, answer the question by interpreting the query result.
-        Third, guide user to rewrite question in order to get better query result if result is not enough to answer.
+        Third, guide user to rewrite question in order to get better query result.
         """,
         input_variables=["question", "query_result"],
     )
     chain = prompt | llm
     response = chain.invoke({"question": question, "query_result": query_result})
     return {"messages": [AIMessage(content=response.content)]}
-
-def route_question(question):
-    prompt = PromptTemplate(
-        template="""You are an expert at routing a user question to a vectorstore or web search.
-        Use the vectostore for questions on Grumatic company and its vision, Heka solution and its product features and customer support.
-        #Grumatic's products: CostClipper, PayerPro, Heka MSP, Heka FinOps.
-        You do not need to be stringent with the keywords in the question related to these topics.
-        Otherwise, use web-search. Give a binary choice 'web_search' or 'vectorstore' based on the question.
-        Return the a JSON with a single key 'datasource' and no premable or explanation.
-        Question to route: {question}""",
-        input_variables=["question"],
-    )
-    llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
-    router = prompt | llm | JsonOutputParser()
-    return router.invoke({"question": question})
 
 def grade_documents(question):
     prompt = PromptTemplate(
@@ -392,7 +388,7 @@ def grade_documents(question):
         Provide the binary score as a JSON with a single key 'score' and no premable or explanation.""",
         input_variables=["question", "document"],
     )
-    llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
+    llm = ChatOpenAI(model_name="gpt4-o1-mini", temperature=0)
     grader = prompt | llm | JsonOutputParser()
     docs = retriever.invoke(question)
     doc_txt = [doc.page_content for doc in docs[:3]]
@@ -415,11 +411,16 @@ instruction_prompt = PromptTemplate(
 
     Today's date is {current_date}.
 
-    NOTE: THE USER CAN'T SEE THE TOOL RESPONSE.
+    NOTE:
+    - THE USER CAN'T SEE THE TOOL RESPONSE.
+    - DO STOP IF THE RESULT OF TOOL CALLS LOOKS LIKE A ERROR.
+    - DO CHECK NAME EXISTENCE BEFORE PRECEEDING TO ANSWER THE QUESTION IF THERE IS A NAME.
 
     A few things to remember:
     - Please include markdown-formatted links to any citations used in your response. Only include one
     or two citations per response unless more are needed. ONLY USE LINKS RETURNED BY THE TOOLS.
+    - MSP(Managed Service Provider) is a company who do provide cloud management service.
+    - MSP's customers is called organization or customer company.
     """,
     input_variables=["current_date"],
     )
@@ -459,15 +460,15 @@ async def acall_agent(state: AgentState, config: RunnableConfig):
     pprint.PrettyPrinter(indent=4, width=80).pprint(state["messages"])
     # TODO: RateLimitError handing needed, exponential backoff!
     response = await model_runnable.ainvoke(state, config)
-    # if state["is_last_step"] and response.tool_calls:
-    #     return {
-    #         "messages": [
-    #             AIMessage(
-    #                 id=response.id,
-    #                 content="Sorry, need more steps to process this request.",
-    #             )
-    #         ]
-    #     }
+    if state["is_last_step"] and response.tool_calls:
+        return {
+            "messages": [
+                AIMessage(
+                    id=response.id,
+                    content="Sorry, need more steps to process this request.",
+                )
+            ]
+        }
     # We return a list, because this will get added to the existing list
     return {"messages": [response]}
 
@@ -531,10 +532,9 @@ agent = StateGraph(AgentState, config_schema=GraphConfig)
 # agent.add_node("summarize_conversation", call_summarize_conversation)
 
 agent.add_node("parse_question", parse_question)
-agent.add_node("get_unique_names", get_unique_names)
 agent.add_node("generate_query", generate_query)
 agent.add_node("execute_query", execute_query)
-agent.add_node("answer_with_query_result", answer_with_query_result)
+agent.add_node("generate_answer", generate_answer)
 agent.add_node("agent", acall_agent)
 from langgraph.pregel import RetryPolicy
 agent.add_node("tools", ToolNode(all_tools), retry=RetryPolicy(max_attempts=3))
@@ -550,7 +550,15 @@ agent.add_node("tools", ToolNode(all_tools), retry=RetryPolicy(max_attempts=3))
 
 # agent.set_entry_point("mongo_agent")
 # agent.add_edge("mongo_agent", "model")
-agent.set_entry_point("parse_question")
+# agent.set_entry_point("parse_question")
+
+agent.set_conditional_entry_point(
+    route_question,
+    {
+        "database": "parse_question",
+        "agent": "agent",
+    },
+)
 
 # # We now define the logic for determining whether to end or summarize the conversation
 # def should_summarize(state: State) -> Literal["summarize_conversation", END]:
@@ -590,10 +598,9 @@ def checking_database_relevance(state: AgentState) -> Literal["yes", "no"]:
 
 agent.add_conditional_edges("parse_question",
                             checking_database_relevance,
-                            {"yes": "get_unique_names",
+                            {"yes": "generate_query",
                              "no": "agent"})
 
-agent.add_edge("get_unique_names", "generate_query")
 agent.add_edge("generate_query", "execute_query")
 
 def checking_query_result_relevance(state: AgentState) -> Literal["yes", "no"]:
@@ -605,10 +612,10 @@ def checking_query_result_relevance(state: AgentState) -> Literal["yes", "no"]:
 
 agent.add_conditional_edges("execute_query",
                             checking_query_result_relevance,
-                            {"yes": "answer_with_query_result",
+                            {"yes": "generate_answer",
                              "no": "agent"})
 
-agent.add_edge("answer_with_query_result", END)
+agent.add_edge("generate_answer", END)
 
 # Always run "model" after "tools"
 agent.add_edge("tools", "agent")
